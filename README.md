@@ -14,7 +14,7 @@
 4. 确认 `BACKUPS` R2 桶已自动创建绑定；若创建失败，在控制台创建 `dsh-cf-backups` 桶后重试。
 5. 等待 Workers Builds 完成镜像构建和 Container provisioning。Worker URL 可访问不代表容器就绪。尚未设置 Access 时，应用会返回 403，不能提交任务。
 6. **设置邮箱验证码登录**：Worker → Access → Protect this Worker behind Access → **All traffic**（不要只保护 Previews）。然后在 Zero Trust → Access → Applications 编辑对应应用，Allow 策略只 Include 你自己的完整邮箱地址，不要 Everyone，也不要不必要地放行整个邮箱域。Zero Trust → Settings → Authentication 添加/启用 **One-time PIN**，应用仅选择该登录方式。不要添加 Bypass / Service Auth 策略。本应用是单所有者共享工作区，不是多租户。
-7. **设置 AI Gateway**：创建同账户 Gateway，开启认证；充值 Unified Billing，或在 Gateway 配置支持的服务商 BYOK（AI Binding 仅使用 default alias）。在 Gateway 创建名称 `dsh` 的动态路由，选择支持 **OpenAI Chat Completions、SSE 流和工具调用** 的模型。默认配置 `AI_GATEWAY_ID=default`、`AI_MODEL=dynamic/dsh`；若改名，在仓库的 Wrangler vars 中修改后部署。也可将 AI_MODEL 改为模型目录中的精确 `author/model` ID。当前不接受 `@cf/` 原生格式，避免不同响应协议被误当 Chat Completions。模型上下文至少 65536、输出上限至少 8192；调整路由时同步修改容器模型声明，并先保存休眠。
+7. **设置 AI Gateway**：创建同账户 Gateway，开启认证；充值 Unified Billing，或在 Gateway 配置支持的服务商 BYOK（AI Binding 仅使用 default alias）。在 Gateway 创建名称 `dsh` 的动态路由，选择支持 **OpenAI Chat Completions、SSE 流和工具调用** 的模型。本仓库当前配置 `AI_GATEWAY_ID=dsh-cf`、`AI_MODEL=dynamic/dsh`；若改名，在仓库的 Wrangler vars 中修改后部署。也可将 AI_MODEL 改为模型目录中的精确 `author/model` ID。当前不接受 `@cf/` 原生格式，避免不同响应协议被误当 Chat Completions。模型上下文至少 65536、输出上限至少 8192；调整路由时同步修改容器模型声明，并先保存休眠。
 8. 打开 Worker URL，输入允许的邮箱并使用收到的一次性验证码登录。提交“创建 hello.txt 并读回”。无需模型 API key 或管理员口令。
 9. 点击“保存并休眠”，确认 `running=false` 且出现检查点时间。再提交“读回 hello.txt，并回顾上一条任务”，验证文件与会话恢复。
 
