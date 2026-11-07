@@ -1,0 +1,5 @@
+# No ADMIN_TOKEN or direct provider API key is used.
+# Configure an authenticated AI Gateway with Unified Billing or a default-alias BYOK.
+AI_GATEWAY_ID="default"
+AI_MODEL="dynamic/dsh"
+# Access is required; this file does not bypass authentication.
