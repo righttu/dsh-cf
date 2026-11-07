@@ -136,10 +136,13 @@ export class DshAgent extends DurableObject {
   }
   async beginModelCall() {
     return this.exclusive(async () => {
-      const task = await this.ctx.storage.get('lastTask');
+      let task = await this.ctx.storage.get('lastTask');
+      let runtime = null;
+      try { const r = await this.bridge('/status'); if (r.ok) { const info = await r.json(); if (info.task && info.task.id === task?.id) { task = info.task; runtime = info.task.timings || null; } } } catch {}
       const call = { taskId: task?.id || null, callId: crypto.randomUUID(), startedAt: Date.now(), taskStartedAt: task?.startedAt || null };
       const previous = await this.ctx.storage.get('responseTiming');
-      const timing = previous?.taskId === call.taskId ? previous : { taskId: call.taskId, firstModelAt: call.startedAt, dispatchDelayMs: task?.startedAt ? call.startedAt - task.startedAt : null };
+      const timing = previous?.taskId === call.taskId ? previous : { taskId: call.taskId, firstModelAt: call.startedAt, dispatchDelayMs: task?.startedAt ? call.startedAt - task.startedAt : null, runtime, runToModelMs: runtime?.beforeRunAt ? Math.max(0, call.startedAt - runtime.beforeRunAt) : null };
+      if (previous?.taskId !== call.taskId) console.log('DSH_PREMODEL_BREAKDOWN', JSON.stringify({ taskId: task?.id, dispatchDelayMs: timing.dispatchDelayMs, runtime, runToModelMs: timing.runToModelMs }));
       await this.ctx.storage.put('responseTiming', timing);
       this.live = { ...call, ...timing, text: '', done: false };
       this.publishLive();
@@ -153,7 +156,7 @@ export class DshAgent extends DurableObject {
     if (this.live.text && !this.live.firstTextAt) {
       this.live.firstTextAt = Date.now();
       this.live.firstTextMs = this.live.taskStartedAt ? this.live.firstTextAt - this.live.taskStartedAt : null;
-      await this.ctx.storage.put('responseTiming', { taskId: this.live.taskId, firstModelAt: this.live.firstModelAt, dispatchDelayMs: this.live.dispatchDelayMs, firstTextAt: this.live.firstTextAt, firstTextMs: this.live.firstTextMs });
+      await this.ctx.storage.put('responseTiming', { taskId: this.live.taskId, firstModelAt: this.live.firstModelAt, dispatchDelayMs: this.live.dispatchDelayMs, firstTextAt: this.live.firstTextAt, firstTextMs: this.live.firstTextMs, runtime: this.live.runtime || null, runToModelMs: this.live.runToModelMs ?? null });
       console.log('DSH_RESPONSE_TIMING', JSON.stringify({ taskId: this.live.taskId, dispatchDelayMs: this.live.dispatchDelayMs, firstTextMs: this.live.firstTextMs }));
     }
     this.publishLive();

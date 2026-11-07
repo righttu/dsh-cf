@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { timeStage } from './timing.mjs';
 import { updateHistory, historyView } from './history.mjs';
 import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
 import { DeepSeekHarness } from '@deepseek-ai/dsh-sdk-client';
@@ -9,16 +10,19 @@ try { state = JSON.parse(await readFile('/data/state.json', 'utf8')); }
 catch (e) { if (e.code !== 'ENOENT') throw e; }
 async function save() { updateHistory(state); await writeFile('/data/state.tmp', JSON.stringify(state)); await rename('/data/state.tmp', '/data/state.json'); }
 if (state.task?.status === 'running') { state.task.status = 'interrupted'; state.task.error = 'Runtime restarted; task was not replayed. Inspect side effects before submitting again.'; await save(); }
-let harness, session, busy = false;
-async function getSession() {
-  if (session) return session;
+let harness, session, runtimeId, busy = false;
+async function getSession(timing) {
+  timing.runtimeReused = !!session;
+  timing.initializeMs = 0; timing.resumeMs = 0;
+  if (session) { timing.runtimeId = runtimeId; return session; }
+  runtimeId = crypto.randomUUID(); timing.runtimeId = runtimeId;
   harness = new DeepSeekHarness({ profile: 'sdk', dshHome: '/data/dsh-home', cwd: '/data/workspace', processCwd: '/data/workspace', patches: ['/app/gateway.cordis.yml'], provider: 'cloudflare-gateway', model: 'dsh-model', approvalRequests: true, env: { PATH: process.env.PATH, HOME: '/data', DSH_GATEWAY_PLACEHOLDER: 'cloudflare-binding-no-secret', DSH_TELEMETRY_DISABLED: '1', NODE_EXTRA_CA_CERTS: '/etc/cloudflare/certs/cloudflare-containers-ca.crt' }, onUserQuestion: async () => ({ cancelled: true }), shutdownTimeoutMs: 15000, disposeEofGraceMs: 15000 });
   // Fail closed: do not grant tool/plugin approvals without an interactive approver.
   harness.client.start();
   harness.client.onRequest(async () => ({ outcome: 'rejected' }));
   try {
-    await harness.start();
-    session = state.sessionId ? await harness.resumeSession(state.sessionId) : harness.session('primary');
+    await timeStage(timing, 'initialize', () => harness.start());
+    session = state.sessionId ? await timeStage(timing, 'resume', () => harness.resumeSession(state.sessionId)) : harness.session('primary');
     return session;
   } catch (e) { await harness.close(); harness = undefined; session = undefined; throw e; }
 }
@@ -34,10 +38,16 @@ function safeDiagnostic(value) {
 }
 async function run(prompt) {
   try {
-    const s = await getSession();
+    const timing = state.task.timings = { version: 1, phase: 'prepare' };
+    const prepareStarted = performance.now();
+    const s = await getSession(timing);
+    timing.prepareMs = performance.now() - prepareStarted;
     // The identity is fixed. Missing/incompatible stored sessions fail rather than reset history.
-    state.sessionId = state.sessionId || 'primary'; await save();
+    state.sessionId = state.sessionId || 'primary'; await timeStage(timing, 'stateSave', save);
+    timing.beforeRunAt = Date.now(); timing.phase = 'agent';
+    console.log('DSH_PREPARE_TIMING', JSON.stringify({ taskId: state.task.id, ...timing }));
     const result = await s.run(prompt);
+    timing.agentMs = Date.now() - timing.beforeRunAt; timing.phase = 'finished';
     state.sessionId = result.sessionId;
     const terminal = result.events?.findLast(event => event.type === 'turn/end');
     const failed = result.finishReason === 'error';
@@ -55,7 +65,7 @@ async function run(prompt) {
 const reply = (res, code, value) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(value)); };
 http.createServer(async (req, res) => {
   try {
-    if (req.method === 'GET' && req.url === '/status') return reply(res, 200, { sessionId: state.sessionId, task: state.task, busy, historySupported: true });
+    if (req.method === 'GET' && req.url === '/status') return reply(res, 200, { sessionId: state.sessionId, task: state.task, busy, historySupported: true, bridgeVersion: 'timing-v1', runtimeReady: !!session });
     if (req.method === 'GET' && req.url === '/history') return reply(res, 200, historyView(state));
     if (req.method === 'POST' && req.url === '/quiesce') {
       if (busy) return reply(res, 409, { error: 'Task is running' });
