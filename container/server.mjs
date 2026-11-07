@@ -22,6 +22,15 @@ async function getSession() {
   } catch (e) { await harness.close(); harness = undefined; session = undefined; throw e; }
 }
 async function closeHarness() { if (harness) { await harness.close(); harness = undefined; session = undefined; } }
+// Keep only terminal diagnostics, never whole conversation/tool payloads.
+function safeDiagnostic(value) {
+  try {
+    return JSON.stringify(value, (key, item) => {
+      if (/authorization|api.?key|token|secret|cookie|password/i.test(key)) return '[redacted]';
+      return item;
+    }).replace(/Bearer\s+[^\s"\\]+/gi, 'Bearer [redacted]').replace(/\bsk-[A-Za-z0-9_-]+/g, '[redacted]').slice(0, 4000);
+  } catch { return 'Terminal error could not be serialized'; }
+}
 async function run(prompt) {
   try {
     const s = await getSession();
@@ -29,7 +38,11 @@ async function run(prompt) {
     state.sessionId = state.sessionId || 'primary'; await save();
     const result = await s.run(prompt);
     state.sessionId = result.sessionId;
-    state.task = { ...state.task, status: result.finishReason === 'error' ? 'failed' : 'completed', response: result.finalResponse, finishReason: result.finishReason };
+    const terminal = result.events?.findLast(event => event.type === 'turn/end');
+    const failed = result.finishReason === 'error';
+    const error = failed ? (safeDiagnostic(terminal?.data?.reason) || result.finalResponse || 'DSH returned error without a terminal diagnostic; inspect AI Gateway logs.') : undefined;
+    state.task = { ...state.task, status: failed ? 'failed' : result.finishReason === 'aborted' ? 'interrupted' : 'completed', response: result.finalResponse, finishReason: result.finishReason, ...(failed ? { error } : {}) };
+    if (failed) console.error('DSH task failed', state.task.id, error);
   } catch (e) { state.task = { ...state.task, status: 'failed', error: String(e.message).slice(0, 4000) }; }
   finally { try { await closeHarness(); } catch (e) { state.task.status = 'failed'; state.task.error = 'Shutdown failed: ' + e.message; } await save(); busy = false; }
 }
