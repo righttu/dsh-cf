@@ -90,3 +90,7 @@ Worker 通过 `ctx.access` 确认平台已验证请求，再读取邮箱身份�
 ## 部署表单字段
 
 `AI_GATEWAY_ID` 与 `AI_MODEL` 都是普通变量，不是 Secret。仅填写可见文本的变量输入框：前者是已创建网关的 ID，后者是模型目录 ID 或已配置的 `dynamic/dsh` 路由。模板不应再生成同名的密码框。若仍看到重复字段，请在本次修复写入 GitHub 后退出旧部署向导，从模板重新发起部署；无需删除已经创建的 AI Gateway。
+
+### 为什么之前出现两组字段
+
+Deploy to Cloudflare 会把 `.dev.vars.example` / `.env.example` 中的赋值作为 Secret 表单字段，而 Wrangler `vars` 生成普通变量字段。此前同名值同时出现在两处，造成重复。仅删除 package.json 的描述元数据不会消除 Secret。本模板现删除了无必要的 `.dev.vars.example`，两项值只在 Wrangler vars 中声明；不需要供应商密钥或管理员口令。此规则见上面的 Deploy to Cloudflare 官方文档。旧向导或已复制的模板不会自动同步上游修复；应在确认修复已写入源仓库后重新从源模板开始。
