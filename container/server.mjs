@@ -1,12 +1,13 @@
 import http from 'node:http';
+import { updateHistory, historyView } from './history.mjs';
 import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
 import { DeepSeekHarness } from '@deepseek-ai/dsh-sdk-client';
 
 await mkdir('/data/workspace', { recursive: true });
-let state = { sessionId: null, task: null };
+let state = { sessionId: null, task: null, history: [] };
 try { state = JSON.parse(await readFile('/data/state.json', 'utf8')); }
 catch (e) { if (e.code !== 'ENOENT') throw e; }
-async function save() { await writeFile('/data/state.tmp', JSON.stringify(state)); await rename('/data/state.tmp', '/data/state.json'); }
+async function save() { updateHistory(state); await writeFile('/data/state.tmp', JSON.stringify(state)); await rename('/data/state.tmp', '/data/state.json'); }
 if (state.task?.status === 'running') { state.task.status = 'interrupted'; state.task.error = 'Runtime restarted; task was not replayed. Inspect side effects before submitting again.'; await save(); }
 let harness, session, busy = false;
 async function getSession() {
@@ -54,7 +55,8 @@ async function run(prompt) {
 const reply = (res, code, value) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(value)); };
 http.createServer(async (req, res) => {
   try {
-    if (req.method === 'GET' && req.url === '/status') return reply(res, 200, { ...state, busy });
+    if (req.method === 'GET' && req.url === '/status') return reply(res, 200, { sessionId: state.sessionId, task: state.task, busy, historySupported: true });
+    if (req.method === 'GET' && req.url === '/history') return reply(res, 200, historyView(state));
     if (req.method === 'POST' && req.url === '/quiesce') {
       if (busy) return reply(res, 409, { error: 'Task is running' });
       await closeHarness(); await save(); return reply(res, 200, { ready: true });
@@ -64,8 +66,9 @@ http.createServer(async (req, res) => {
       let text = ''; for await (const chunk of req) { text += chunk; if (Buffer.byteLength(text) > 32768) return reply(res, 413, { error: 'Prompt too large' }); }
       const body = JSON.parse(text);
       if (typeof body.prompt !== 'string' || !body.prompt.trim() || typeof body.id !== 'string') return reply(res, 400, { error: 'Invalid task' });
+      if (busy) return reply(res, 409, { error: 'Task is running' });
       if (state.task?.id === body.id) return reply(res, 200, state.task);
-      busy = true; state.task = { id: body.id, status: 'running', startedAt: Date.now() }; await save();
+      busy = true; state.task = { id: body.id, prompt: body.prompt, status: 'running', startedAt: Date.now() }; await save();
       reply(res, 202, state.task); void run(body.prompt); return;
     }
     reply(res, 404, { error: 'Not found' });

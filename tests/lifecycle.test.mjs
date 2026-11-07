@@ -52,6 +52,7 @@ function fixture({ running = false, busy = false, revision, backup } = {}) {
   const g = new DshAgent(ctx, {});
   const info = { busy, task: null };
   g.bridge = async (path) => {
+    if (path === '/history') return Response.json({ available: true, entries: [], total: 0 });
     if (path === '/quiesce') { events.push('quiesce'); return Response.json({}, { status: info.busy ? 409 : 200 }); }
     return Response.json(info);
   };
@@ -146,4 +147,26 @@ test('busy work blocks one-action restore without destroying container', async (
   await assert.rejects(g.recover(), /任务正在执行/);
   assert.equal(c.running, true);
   assert.equal(events.includes('destroy'), false);
+});
+
+test('viewing saved history never starts a container', async () => {
+  const { g, c, data, events } = fixture();
+  data.set('checkpointHistory', { available: true, entries: [{ id: 'saved' }], total: 1 });
+  const history = await g.history();
+  assert.equal(history.source, 'saved');
+  assert.equal(c.running, false);
+  assert.equal(events.length, 0);
+});
+
+test('R2 restore replaces visible history and latest result instead of showing newer cache', async () => {
+  const { g, data } = fixture({ backup: { id: 'older-backup' } });
+  data.set('checkpointHistory', { available: true, entries: [{ id: 'newer' }], total: 1 });
+  data.set('lastTask', { id: 'newer', status: 'completed' });
+  data.set('lastGatewayError', { at: Date.now(), message: 'unrelated later failure' });
+  await g.recover();
+  const history = await g.history();
+  assert.equal(history.source, 'r2-restored');
+  assert.deepEqual(history.entries, []);
+  assert.equal(data.get('lastTask'), null);
+  assert.equal(data.has('lastGatewayError'), false);
 });

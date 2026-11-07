@@ -121,9 +121,27 @@ export class DshAgent extends DurableObject {
         if (info.task) await this.rememberTask(info.task);
       }
       const cp = await this.ctx.storage.get('checkpoint');
-      const hasBackup = !!(await this.ctx.storage.get('latestBackup'));
+      const latestBackup = await this.ctx.storage.get('latestBackup');
+      const hasBackup = !!latestBackup;
+      const backupAt = await this.ctx.storage.get('latestBackupAt') ?? (latestBackup?.id && latestBackup.id === cp?.backup?.id ? cp.at : null);
       const lastActivity = await this.ctx.storage.get('lastActivity');
-      return { ...info, hasBackup, idleShutdownAt: this.ctx.container.running && !info.busy && lastActivity ? lastActivity + 10 * MINUTE : null, running: this.ctx.container.running, checkpointAt: cp?.at ?? null, checkpointError: await this.ctx.storage.get('checkpointError') ?? null, lastGatewayError: await this.ctx.storage.get('lastGatewayError') ?? null, modelConfig: { model: this.env.AI_MODEL || null, gateway: this.env.AI_GATEWAY_ID || 'default' } };
+      return { ...info, hasBackup, backupAt, idleShutdownAt: this.ctx.container.running && !info.busy && lastActivity ? lastActivity + 10 * MINUTE : null, running: this.ctx.container.running, checkpointAt: cp?.at ?? null, checkpointError: await this.ctx.storage.get('checkpointError') ?? null, lastGatewayError: await this.ctx.storage.get('lastGatewayError') ?? null, modelConfig: { model: this.env.AI_MODEL || null, gateway: this.env.AI_GATEWAY_ID || 'default' } };
+    });
+  }
+  async readHistory() {
+    const r = await this.bridge('/history');
+    if (r.status === 404) return { available: false, entries: [], total: 0, reason: '此容器仍使用旧版本，未提供任务历史。可先保存，再恢复备份以切换到新版容器；旧任务原文无法自动补齐。' };
+    if (!r.ok) throw new Error('无法读取容器中的任务历史');
+    const data = await r.json();
+    if (!Array.isArray(data.entries)) throw new Error('历史数据格式不正确');
+    return { available: true, entries: data.entries, total: data.total, sessionId: data.sessionId || null, readAt: Date.now() };
+  }
+  async history() {
+    return this.exclusive(async () => {
+      if (this.ctx.container.running) return { ...(await this.readHistory()), source: 'container' };
+      const saved = await this.ctx.storage.get('checkpointHistory');
+      return saved ? { ...saved, source: saved.restoredAt ? 'r2-restored' : 'saved', running: false }
+        : { available: false, entries: [], total: 0, source: 'unknown', reason: '尚无可核验的历史记录。不会为查看历史自动启动容器。' };
     });
   }
   async checkpoint() {
@@ -150,10 +168,12 @@ export class DshAgent extends DurableObject {
       const quiet = await this.bridge('/quiesce', {});
       if (!quiet.ok) throw new Error('Restarted bridge is not quiescent; backup postponed');
     }
+    const history = await this.readHistory();
     const backup = await this.backups.backup({ dir: '/data' });
-    await this.ctx.storage.put('latestBackup', backup);
+    await this.ctx.storage.put({ latestBackup: backup, latestBackupAt: Date.now() });
     const snapshot = await c.snapshotContainer({ name: 'dsh-idle' });
     await this.ctx.storage.put('checkpoint', { snapshot, backup, image: c.images.dsh, at: Date.now() });
+    await this.ctx.storage.put('checkpointHistory', history);
     await this.ctx.storage.delete('checkpointError');
     await this.ctx.storage.delete('routingRecovery');
     await c.destroy(); this.setup = undefined;
@@ -181,15 +201,24 @@ export class DshAgent extends DurableObject {
       try {
         await this.backups.intercept();
         await this.backups.restore(backup);
+        await c.exec(['sh', '-c', 'exec node /app/server.mjs >>/data/bridge.log 2>&1'], { stdout: 'ignore', stderr: 'ignore' });
+        let restoredInfo;
+        for (let i = 0; i < 40; i++) {
+          try { const r = await this.bridge('/status'); if (r.ok) { restoredInfo = await r.json(); break; } } catch {}
+          await new Promise(resolve => setTimeout(resolve, 250));
+        }
+        if (!restoredInfo) throw new Error('恢复后的文件无法核验；已保留恢复前的安全快照。');
+        const history = await this.readHistory();
+        const quiet = await this.bridge('/quiesce', {});
+        if (!quiet.ok) throw new Error('恢复后的环境无法安全保存');
         const snapshot = await c.snapshotContainer({ name: 'r2-recovery' });
         await this.ctx.storage.put('checkpoint', { snapshot, backup, image: c.images.dsh, at: Date.now() });
         await this.ctx.storage.delete('routingRecovery');
         await this.ctx.storage.delete('checkpointError');
-        const previous = await this.ctx.storage.get('lastTask');
-        if (previous?.status === 'running') {
-          const interrupted = { ...previous, status: 'interrupted', error: 'Explicitly restored an older R2 backup. External side effects are not rolled back. No task was replayed.' };
-          await this.ctx.storage.put({ lastTask: interrupted, ['request:' + previous.id]: interrupted });
-        }
+        await this.ctx.storage.put('checkpointHistory', { ...history, restoredAt: Date.now() });
+        // The visible result must come from restored files, not the newer DO cache.
+        await this.ctx.storage.put('lastTask', restoredInfo.task || null);
+        await this.ctx.storage.delete('lastGatewayError');
       } finally { await c.destroy(); this.setup = undefined; }
       return { recovered: true, note: 'Next task starts DSH and validates session compatibility. No task was replayed.' };
     });
@@ -224,7 +253,8 @@ export default {
     const agent = env.DSH.getByName('owner');
     try {
       let response;
-      if (u.pathname === '/api/status' && request.method === 'GET') response = Response.json(await agent.status());
+      if (u.pathname === '/api/history' && request.method === 'GET') response = Response.json(await agent.history());
+      else if (u.pathname === '/api/status' && request.method === 'GET') response = Response.json(await agent.status());
       else if (u.pathname === '/api/tasks' && request.method === 'POST') { if (Number(request.headers.get('content-length')) > 32768) return new Response('Too large', { status: 413 }); const text = await request.text(); if (text.length > 32768) return new Response('Too large', { status: 413 }); response = await agent.submit(JSON.parse(text)); }
       else if (u.pathname === '/api/checkpoint' && request.method === 'POST') response = Response.json(await agent.checkpoint());
       else if (u.pathname === '/api/recover' && request.method === 'POST') response = Response.json(await agent.recover());
