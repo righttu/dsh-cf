@@ -10,7 +10,7 @@ try { state = JSON.parse(await readFile('/data/state.json', 'utf8')); }
 catch (e) { if (e.code !== 'ENOENT') throw e; }
 async function save() { updateHistory(state); await writeFile('/data/state.tmp', JSON.stringify(state)); await rename('/data/state.tmp', '/data/state.json'); }
 if (state.task?.status === 'running') { state.task.status = 'interrupted'; state.task.error = 'Runtime restarted; task was not replayed. Inspect side effects before submitting again.'; await save(); }
-let harness, session, runtimeId, busy = false;
+let harness, session, runtimeId, busy = false, activeRunClock = null;
 async function getSession(timing) {
   timing.runtimeReused = !!session;
   timing.initializeMs = 0; timing.resumeMs = 0;
@@ -37,6 +37,7 @@ function safeDiagnostic(value) {
   } catch { return 'Terminal error could not be serialized'; }
 }
 async function run(prompt) {
+  activeRunClock = null;
   try {
     const timing = state.task.timings = { version: 1, phase: 'prepare' };
     const prepareStarted = performance.now();
@@ -44,7 +45,7 @@ async function run(prompt) {
     timing.prepareMs = performance.now() - prepareStarted;
     // The identity is fixed. Missing/incompatible stored sessions fail rather than reset history.
     state.sessionId = state.sessionId || 'primary'; await timeStage(timing, 'stateSave', save);
-    timing.beforeRunAt = Date.now(); timing.phase = 'agent';
+    timing.beforeRunAt = Date.now(); activeRunClock = performance.now(); timing.phase = 'agent';
     console.log('DSH_PREPARE_TIMING', JSON.stringify({ taskId: state.task.id, ...timing }));
     const result = await s.run(prompt);
     timing.agentMs = Date.now() - timing.beforeRunAt; timing.phase = 'finished';
@@ -65,7 +66,7 @@ async function run(prompt) {
 const reply = (res, code, value) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(value)); };
 http.createServer(async (req, res) => {
   try {
-    if (req.method === 'GET' && req.url === '/status') return reply(res, 200, { sessionId: state.sessionId, task: state.task, busy, historySupported: true, bridgeVersion: 'timing-v1', runtimeReady: !!session });
+    if (req.method === 'GET' && req.url === '/status') return reply(res, 200, { sessionId: state.sessionId, task: state.task, busy, historySupported: true, bridgeVersion: 'timing-v2', runtimeReady: !!session, runElapsedMs: busy && activeRunClock !== null ? performance.now() - activeRunClock : null });
     if (req.method === 'GET' && req.url === '/history') return reply(res, 200, historyView(state));
     if (req.method === 'POST' && req.url === '/quiesce') {
       if (busy) return reply(res, 409, { error: 'Task is running' });

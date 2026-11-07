@@ -117,7 +117,7 @@ export class DshAgent extends DurableObject {
       if (status.busy) return Response.json({ error: 'Another task is running' }, { status: 409 });
       // Record intent before crossing the process boundary. An ambiguous response must not replay work.
       const intent = { id: body.id, status: 'submission-unknown', startedAt: Date.now() };
-      await this.ctx.storage.put({ ['request:' + body.id]: intent, lastActivity: Date.now() });
+      await this.ctx.storage.put({ ['request:' + body.id]: intent, lastActivity: Date.now(), taskTimingStart: { id: body.id, acceptedAt: intent.startedAt } });
       const r = await this.bridge('/tasks', body); const task = await r.json();
       if (r.ok) { this.live = null; await this.ctx.storage.put({ ['request:' + body.id]: task, lastTask: task }); }
       return Response.json(task, { status: r.status });
@@ -137,11 +137,13 @@ export class DshAgent extends DurableObject {
   async beginModelCall() {
     return this.exclusive(async () => {
       let task = await this.ctx.storage.get('lastTask');
-      let runtime = null;
-      try { const r = await this.bridge('/status'); if (r.ok) { const info = await r.json(); if (info.task && info.task.id === task?.id) { task = info.task; runtime = info.task.timings || null; } } } catch {}
-      const call = { taskId: task?.id || null, callId: crypto.randomUUID(), startedAt: Date.now(), taskStartedAt: task?.startedAt || null };
+      let runtime = null, runToModelMs = null;
+      try { const r = await this.bridge('/status'); if (r.ok) { const info = await r.json(); if (info.task && info.task.id === task?.id) { task = info.task; runtime = info.task.timings || null; runToModelMs = Number.isFinite(info.runElapsedMs) ? info.runElapsedMs : null; } } } catch {}
+      const anchor = await this.ctx.storage.get('taskTimingStart');
+      const taskStartedAt = anchor?.id === task?.id && Number.isFinite(anchor?.acceptedAt) ? anchor.acceptedAt : null;
+      const call = { taskId: task?.id || null, callId: crypto.randomUUID(), startedAt: Date.now(), taskStartedAt };
       const previous = await this.ctx.storage.get('responseTiming');
-      const timing = previous?.taskId === call.taskId ? previous : { taskId: call.taskId, firstModelAt: call.startedAt, dispatchDelayMs: task?.startedAt ? call.startedAt - task.startedAt : null, runtime, runToModelMs: runtime?.beforeRunAt ? Math.max(0, call.startedAt - runtime.beforeRunAt) : null };
+      const timing = previous?.taskId === call.taskId && previous.timingVersion === 2 ? previous : { timingVersion: 2, taskId: call.taskId, firstModelAt: call.startedAt, dispatchDelayMs: taskStartedAt != null ? call.startedAt - taskStartedAt : null, runtime, runToModelMs };
       if (previous?.taskId !== call.taskId) console.log('DSH_PREMODEL_BREAKDOWN', JSON.stringify({ taskId: task?.id, dispatchDelayMs: timing.dispatchDelayMs, runtime, runToModelMs: timing.runToModelMs }));
       await this.ctx.storage.put('responseTiming', timing);
       this.live = { ...call, ...timing, text: '', done: false };
@@ -156,7 +158,7 @@ export class DshAgent extends DurableObject {
     if (this.live.text && !this.live.firstTextAt) {
       this.live.firstTextAt = Date.now();
       this.live.firstTextMs = this.live.taskStartedAt ? this.live.firstTextAt - this.live.taskStartedAt : null;
-      await this.ctx.storage.put('responseTiming', { taskId: this.live.taskId, firstModelAt: this.live.firstModelAt, dispatchDelayMs: this.live.dispatchDelayMs, firstTextAt: this.live.firstTextAt, firstTextMs: this.live.firstTextMs, runtime: this.live.runtime || null, runToModelMs: this.live.runToModelMs ?? null });
+      await this.ctx.storage.put('responseTiming', { timingVersion: 2, taskId: this.live.taskId, firstModelAt: this.live.firstModelAt, dispatchDelayMs: this.live.dispatchDelayMs, firstTextAt: this.live.firstTextAt, firstTextMs: this.live.firstTextMs, runtime: this.live.runtime || null, runToModelMs: this.live.runToModelMs ?? null });
       console.log('DSH_RESPONSE_TIMING', JSON.stringify({ taskId: this.live.taskId, dispatchDelayMs: this.live.dispatchDelayMs, firstTextMs: this.live.firstTextMs }));
     }
     this.publishLive();

@@ -140,3 +140,7 @@ Bridge `timing-v1` 为每个任务报告是否复用已初始化运行时、运�
 Bridge 的准备日志 `DSH_PREPARE_TIMING` 写入容器 `/data/bridge.log`；Worker 的 `DSH_PREMODEL_BREAKDOWN` 可在 Workers Observability 中读取。仅记录 ID、阶段和时间，不记录提示词/回答。新版 Worker 接旧快照时缺失分段数据会明确标记，不把未知数据当零。需要启用容器内分段计时时：先成功保存当前文件，再从 R2 恢复以使用新镜像；这不是重新创建空环境。
 
 自动闲置休眠由容器外 `DshAgent` 的 Agents Lifecycle 持久任务 `inspect` 实现，约每分钟以 Durable Object Alarm 唤醒控制层检查。没有任务执行且距离最后一个任务结束超过 10 分钟时，关闭并刷新 DSH、备份 `/data` 到 R2、创建 Snapshot、保存记录，再 `container.destroy()`。任务持续执行不按闲置规则停止，页面轮询不更新 lastActivity。检查周期意味着约 10–11 分钟，而非精确到秒。`setInactivityTimeout(5 分钟)` 是平台在 Durable Object 不再活跃时的容器存活兜底；正常 inspect 每分钟保持控制层活跃，它不是用户闲置 10 分钟计时器。故障、平台停止或进程异常仍可能导致最后一次成功保存后的变化丢失，不承诺绝对不丢失。
+
+## 响应计时口径修正（timing-v2）
+
+旧统计混用了容器 task.startedAt 与 Durable Object 的时钟，跨环境时钟偏移会产生约几十毫秒负值。新任务从控制层提交任务时持久化同一控制层时钟的起点，到首次模型调用/首次公开文本都在同一控制层计时。它不包括之前的 Snapshot 启动；包含任务提交与状态写入开销。旧任务缺少起点时返回 null，不将负值截成零伪造数据。页面不展示负耗时。进入 SDK run 到模型调用前的区间由 Bridge 的单调时钟在状态查询时计算，不再做跨时钟相减；没有新版 Bridge 则该项未知。

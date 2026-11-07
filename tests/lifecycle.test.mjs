@@ -200,6 +200,7 @@ test('already running demo does not fabricate a new startup measurement', async 
 test('first visible text timing survives later model calls for the same task', async () => {
   const { g, data } = fixture({ running: true });
   data.set('lastTask', { id: 'a', status: 'running', startedAt: Date.now() - 100 });
+  data.set('taskTimingStart', { id: 'a', acceptedAt: Date.now() - 100 });
   const call = await g.beginModelCall();
   await g.modelProgress({ ...call, text: 'hello', done: false });
   const timing = structuredClone(data.get('responseTiming'));
@@ -221,4 +222,28 @@ test('closing live stream does not stop container or replay task', async () => {
   assert.equal(c.running, true);
   assert.equal(g.viewers.size, 0);
   assert.equal(events.includes('destroy'), false);
+});
+
+
+test('container clock skew does not produce negative response timing', async () => {
+  const { g, data, info } = fixture({ running: true });
+  const task = { id: 'clock-test', status: 'running', startedAt: Date.now() + 60000 };
+  data.set('lastTask', task); info.task = task;
+  data.set('taskTimingStart', { id: task.id, acceptedAt: Date.now() - 100 });
+  const call = await g.beginModelCall();
+  await g.modelProgress({ ...call, text: 'hello', done: true });
+  const measured = data.get('responseTiming');
+  assert.equal(measured.timingVersion, 2);
+  assert.ok(measured.dispatchDelayMs >= 100);
+  assert.ok(measured.firstTextMs >= 100);
+  assert.equal(measured.runToModelMs, null);
+});
+
+test('legacy task without a control-clock anchor is unmeasured, not guessed', async () => {
+  const { g, data } = fixture({ running: true });
+  data.set('lastTask', { id: 'legacy', status: 'running', startedAt: Date.now() + 60000 });
+  const call = await g.beginModelCall();
+  await g.modelProgress({ ...call, text: 'answer', done: true });
+  assert.equal(data.get('responseTiming').dispatchDelayMs, null);
+  assert.equal(data.get('responseTiming').firstTextMs, null);
 });
