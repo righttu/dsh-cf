@@ -86,3 +86,7 @@ Worker 通过 `ctx.access` 确认平台已验证请求，再读取邮箱身份�
 
 - https://developers.cloudflare.com/workers/configuration/cloudflare-access/
 - https://developers.cloudflare.com/ai-gateway/usage/worker-binding-methods/
+
+## 部署表单字段
+
+`AI_GATEWAY_ID` 与 `AI_MODEL` 都是普通变量，不是 Secret。仅填写可见文本的变量输入框：前者是已创建网关的 ID，后者是模型目录 ID 或已配置的 `dynamic/dsh` 路由。模板不应再生成同名的密码框。若仍看到重复字段，请在本次修复写入 GitHub 后退出旧部署向导，从模板重新发起部署；无需删除已经创建的 AI Gateway。
