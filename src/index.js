@@ -4,23 +4,32 @@ import { DirectoryBackup } from '@cloudflare/sandbox';
 import { page } from './page.js';
 export { DirectoryBackupGateway } from '@cloudflare/sandbox';
 const MINUTE = 60000;
+function diagnosticText(value) {
+  return String(value ?? 'Unknown error').replace(/Bearer\s+[^\s"\\]+/gi, 'Bearer [redacted]').replace(/\bsk-[A-Za-z0-9_-]+/g, '[redacted]').slice(0, 1600);
+}
 
 export class Outbound extends WorkerEntrypoint {
   async fetch(request) {
     const u = new URL(request.url);
     // This hostname is virtual: never forward container credentials or requests to OpenAI.
     if (u.protocol !== 'https:' || u.hostname !== 'api.openai.com' || u.pathname !== '/v1/chat/completions' || request.method !== 'POST') return new Response('Destination denied', { status: 403 });
+    let stage = 'parse-request';
     try {
       const input = await request.json();
       delete input.model;
       const model = this.env.AI_MODEL;
-      if (!model || model.startsWith('@cf/')) return Response.json({ error: { message: 'Configure AI_MODEL as a Gateway catalog model or dynamic route (OpenAI chat format).' } }, { status: 503 });
+      stage = 'ai-binding';
+      if (!model || model.startsWith('@cf/')) throw new Error('Configure AI_MODEL as a Gateway catalog model or dynamic route (OpenAI chat format).');
       const output = await this.env.AI.run(model, input, { gateway: { id: this.env.AI_GATEWAY_ID || 'default', skipCache: true } });
       if (output instanceof Response) return output;
       if (output instanceof ReadableStream) return new Response(output, { headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-store' } });
       return Response.json(output);
     } catch (e) {
-      return Response.json({ error: { message: String(e.message).slice(0, 1000), type: 'gateway_error' } }, { status: 502 });
+      const failure = { at: Date.now(), stage, model: String(this.env.AI_MODEL || ''), gateway: String(this.env.AI_GATEWAY_ID || 'default'), message: diagnosticText(e?.message || e), code: e?.code == null ? null : diagnosticText(e.code), status: Number.isInteger(e?.status) ? e.status : null };
+      // Never log request headers, prompt, tools or the complete error object.
+      console.error('DSH_GATEWAY_FAILURE', JSON.stringify(failure));
+      try { await this.env.DSH.getByName('owner').recordGatewayError(failure); } catch { console.error('DSH_GATEWAY_DIAGNOSTIC_PERSIST_FAILED'); }
+      return Response.json({ error: { message: failure.message, type: 'gateway_error', code: failure.code } }, { status: 502 });
     }
   }
 }
@@ -87,6 +96,10 @@ export class DshAgent extends DurableObject {
       return Response.json(task, { status: r.status });
     });
   }
+  async recordGatewayError(failure) {
+    await this.lifecycle.start();
+    await this.ctx.storage.put('lastGatewayError', { at: Number(failure.at), stage: diagnosticText(failure.stage), model: diagnosticText(failure.model), gateway: diagnosticText(failure.gateway), message: diagnosticText(failure.message), code: failure.code == null ? null : diagnosticText(failure.code), status: Number.isInteger(failure.status) ? failure.status : null });
+  }
   async status() {
     await this.lifecycle.start();
     return this.exclusive(async () => {
@@ -96,7 +109,7 @@ export class DshAgent extends DurableObject {
         if (info.task) await this.ctx.storage.put({ lastTask: info.task, ['request:' + info.task.id]: info.task });
       }
       const cp = await this.ctx.storage.get('checkpoint');
-      return { ...info, running: this.ctx.container.running, checkpointAt: cp?.at ?? null, checkpointError: await this.ctx.storage.get('checkpointError') ?? null };
+      return { ...info, running: this.ctx.container.running, checkpointAt: cp?.at ?? null, checkpointError: await this.ctx.storage.get('checkpointError') ?? null, lastGatewayError: await this.ctx.storage.get('lastGatewayError') ?? null, modelConfig: { model: this.env.AI_MODEL || null, gateway: this.env.AI_GATEWAY_ID || 'default' } };
     });
   }
   async checkpoint() {
