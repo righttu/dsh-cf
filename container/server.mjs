@@ -43,8 +43,13 @@ async function run(prompt) {
     const error = failed ? (safeDiagnostic(terminal?.data?.reason) || result.finalResponse || 'DSH returned error without a terminal diagnostic; inspect AI Gateway logs.') : undefined;
     state.task = { ...state.task, status: failed ? 'failed' : result.finishReason === 'aborted' ? 'interrupted' : 'completed', response: result.finalResponse, finishReason: result.finishReason, ...(failed ? { error } : {}) };
     if (failed) console.error('DSH task failed', state.task.id, error);
-  } catch (e) { state.task = { ...state.task, status: 'failed', error: String(e.message).slice(0, 4000) }; }
-  finally { try { await closeHarness(); } catch (e) { state.task.status = 'failed'; state.task.error = 'Shutdown failed: ' + e.message; } await save(); busy = false; }
+  } catch (e) {
+    state.task = { ...state.task, status: 'failed', error: String(e.message).slice(0, 4000) };
+    try { await closeHarness(); } catch (closeError) { state.task.error += '; Shutdown failed: ' + closeError.message; }
+  }
+  // Keep the initialized DSH runtime/session warm between tasks. /quiesce closes
+  // it and drains persistence before any backup or filesystem snapshot.
+  finally { state.task.finishedAt = Date.now(); await save(); busy = false; }
 }
 const reply = (res, code, value) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(value)); };
 http.createServer(async (req, res) => {

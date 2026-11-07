@@ -44,6 +44,15 @@ export class DshAgent extends DurableObject {
     if (ctx.container?.running) void ctx.blockConcurrencyWhile(() => ctx.container.setInactivityTimeout(5 * MINUTE));
   }
   exclusive(fn) { const p = this.queue.then(fn); this.queue = p.catch(() => {}); return p; }
+  async rememberTask(task) {
+    const previous = await this.ctx.storage.get('lastTask');
+    const values = { lastTask: task, ['request:' + task.id]: task };
+    // Count idle time from task completion, never from polling or task start.
+    if (task.status !== 'running' && (!previous || previous.id !== task.id || previous.status === 'running')) {
+      values.lastActivity = Number.isFinite(task.finishedAt) ? Math.min(task.finishedAt, Date.now()) : Date.now();
+    }
+    await this.ctx.storage.put(values);
+  }
   async bridge(path, body) {
     return this.ctx.container.getTcpPort(8080).fetch('http://container' + path, { method: body === undefined ? 'GET' : 'POST', ...(body === undefined ? {} : { body: JSON.stringify(body), headers: { 'content-type': 'application/json' } }) });
   }
@@ -57,17 +66,20 @@ export class DshAgent extends DurableObject {
     if (fresh) {
       const lastTask = await this.ctx.storage.get('lastTask');
       if (lastTask?.status === 'running') throw new Error('Previous task lost its runtime. Inspect side effects and explicitly recover from R2; refusing automatic replay.');
-      const checkpoint = await this.ctx.storage.get('checkpoint');
+      // A temporary safety snapshot protects live files during egress-policy migration.
+      const checkpoint = await this.ctx.storage.get('routingRecovery') ?? await this.ctx.storage.get('checkpoint');
       const recovering = await this.ctx.storage.get('everStarted');
       if (recovering && !checkpoint) throw new Error('No saved checkpoint exists. Recovery requires inspection; refusing to start empty.');
       // Snapshot failure is explicit. Use the authenticated R2 recovery endpoint if expired.
       c.start({ ...(checkpoint?.snapshot ? { containerSnapshot: checkpoint.snapshot } : { image: c.images.dsh }), instance: 'standard-1', entrypoint: ['sleep', 'infinity'], enableInternet: false });
     }
     await c.setInactivityTimeout(5 * MINUTE);
+    // Specific backup target MUST precede the port-80 catch-all.
+    await this.backups.intercept();
     await c.interceptAllOutboundHttp(this.ctx.exports.Outbound);
     await c.interceptOutboundHttps('*', this.ctx.exports.Outbound);
     if (fresh) {
-      await this.ctx.storage.put('everStarted', true);
+      await this.ctx.storage.put({ everStarted: true, networkRevision: 2 });
       // Redirect all output to files: piped exec streams cannot outlive the request.
       await c.exec(['sh', '-c', 'exec node /app/server.mjs >>/data/bridge.log 2>&1'], { stdout: 'ignore', stderr: 'ignore' });
     }
@@ -106,15 +118,20 @@ export class DshAgent extends DurableObject {
       let info = { task: await this.ctx.storage.get('lastTask') ?? null, busy: false };
       if (this.ctx.container.running) {
         info = await (await this.bridge('/status')).json();
-        if (info.task) await this.ctx.storage.put({ lastTask: info.task, ['request:' + info.task.id]: info.task });
+        if (info.task) await this.rememberTask(info.task);
       }
       const cp = await this.ctx.storage.get('checkpoint');
-      return { ...info, running: this.ctx.container.running, checkpointAt: cp?.at ?? null, checkpointError: await this.ctx.storage.get('checkpointError') ?? null, lastGatewayError: await this.ctx.storage.get('lastGatewayError') ?? null, modelConfig: { model: this.env.AI_MODEL || null, gateway: this.env.AI_GATEWAY_ID || 'default' } };
+      const hasBackup = !!(await this.ctx.storage.get('latestBackup'));
+      const lastActivity = await this.ctx.storage.get('lastActivity');
+      return { ...info, hasBackup, idleShutdownAt: this.ctx.container.running && !info.busy && lastActivity ? lastActivity + 10 * MINUTE : null, running: this.ctx.container.running, checkpointAt: cp?.at ?? null, checkpointError: await this.ctx.storage.get('checkpointError') ?? null, lastGatewayError: await this.ctx.storage.get('lastGatewayError') ?? null, modelConfig: { model: this.env.AI_MODEL || null, gateway: this.env.AI_GATEWAY_ID || 'default' } };
     });
   }
   async checkpoint() {
     await this.lifecycle.start();
-    return this.exclusive(() => this.saveAndStop());
+    return this.exclusive(async () => {
+      try { return await this.saveAndStop(); }
+      catch (e) { await this.ctx.storage.put('checkpointError', diagnosticText(e.message)); throw e; }
+    });
   }
   async saveAndStop() {
     const c = this.ctx.container;
@@ -122,28 +139,52 @@ export class DshAgent extends DurableObject {
     const r = await this.bridge('/quiesce', {});
     if (!r.ok) throw new Error('Task is busy; checkpoint postponed');
     const info = await (await this.bridge('/status')).json();
-    if (info.task) await this.ctx.storage.put({ lastTask: info.task, ['request:' + info.task.id]: info.task });
+    if (info.task) await this.rememberTask(info.task);
+    if (await this.ctx.storage.get('networkRevision') !== 2) {
+      // Old containers already registered catch-all first; targets cannot be removed.
+      // Quiesce above, durably store a safety snapshot, then restart from exactly it.
+      const snapshot = await c.snapshotContainer({ name: 'before-backup-routing-fix' });
+      await this.ctx.storage.put('routingRecovery', { snapshot, at: Date.now(), image: c.images.dsh });
+      await c.destroy(); this.setup = undefined;
+      await this.ensure();
+      const quiet = await this.bridge('/quiesce', {});
+      if (!quiet.ok) throw new Error('Restarted bridge is not quiescent; backup postponed');
+    }
     const backup = await this.backups.backup({ dir: '/data' });
     await this.ctx.storage.put('latestBackup', backup);
     const snapshot = await c.snapshotContainer({ name: 'dsh-idle' });
     await this.ctx.storage.put('checkpoint', { snapshot, backup, image: c.images.dsh, at: Date.now() });
     await this.ctx.storage.delete('checkpointError');
+    await this.ctx.storage.delete('routingRecovery');
     await c.destroy(); this.setup = undefined;
     return { saved: true };
   }
   async recover() {
     await this.lifecycle.start();
     return this.exclusive(async () => {
-      if (this.ctx.container.running) throw new Error('Stop/checkpoint the live instance before recovery');
       const backup = await this.ctx.storage.get('latestBackup');
       if (!backup) throw new Error('No R2 backup exists');
       const c = this.ctx.container;
+      if (c.running) {
+        const info = await (await this.bridge('/status')).json();
+        if (info.busy) throw new Error('任务正在执行，请等待结束后再恢复备份。');
+        if (info.task) await this.rememberTask(info.task);
+        const quiet = await this.bridge('/quiesce', {});
+        if (!quiet.ok) throw new Error('无法安全停止 DSH，未覆盖任何文件。');
+        // Protect the current files without replacing the R2 backup selected above.
+        const snapshot = await c.snapshotContainer({ name: 'before-r2-restore' });
+        await this.ctx.storage.put('routingRecovery', { snapshot, image: c.images.dsh, at: Date.now() });
+        await c.destroy(); this.setup = undefined;
+      }
       c.start({ image: c.images.dsh, instance: 'standard-1', entrypoint: ['sleep', 'infinity'], enableInternet: false });
       await c.setInactivityTimeout(5 * MINUTE);
       try {
+        await this.backups.intercept();
         await this.backups.restore(backup);
         const snapshot = await c.snapshotContainer({ name: 'r2-recovery' });
         await this.ctx.storage.put('checkpoint', { snapshot, backup, image: c.images.dsh, at: Date.now() });
+        await this.ctx.storage.delete('routingRecovery');
+        await this.ctx.storage.delete('checkpointError');
         const previous = await this.ctx.storage.get('lastTask');
         if (previous?.status === 'running') {
           const interrupted = { ...previous, status: 'interrupted', error: 'Explicitly restored an older R2 backup. External side effects are not rolled back. No task was replayed.' };
@@ -161,7 +202,7 @@ export class DshAgent extends DurableObject {
       await c.setInactivityTimeout(5 * MINUTE);
       try {
         const info = await (await this.bridge('/status')).json();
-        if (info.task) await this.ctx.storage.put({ lastTask: info.task, ['request:' + info.task.id]: info.task });
+        if (info.task) await this.rememberTask(info.task);
         const last = await this.ctx.storage.get('lastActivity') ?? 0;
         if (!info.busy && Date.now() - last > 10 * MINUTE) { await this.saveAndStop(); return; }
       } catch (e) { await this.ctx.storage.put('checkpointError', String(e.message)); }

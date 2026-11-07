@@ -3,8 +3,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "deploy": "wrangler deploy",
-    "check": "node --check src/index.js && node --check src/page.js && node --check container/server.mjs && wrangler deploy --dry-run --outdir /tmp/dsh-cf-check"
+    "deploy": "npm test && wrangler deploy",
+    "check": "node --check src/index.js && node --check src/page.js && node --check container/server.mjs && npm test && wrangler deploy --dry-run --outdir /tmp/dsh-cf-check",
+    "test": "node --test tests/*.test.mjs"
   },
   "dependencies": {
     "agents": "0.33.0",
