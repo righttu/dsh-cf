@@ -170,3 +170,55 @@ test('R2 restore replaces visible history and latest result instead of showing n
   assert.equal(data.get('lastTask'), null);
   assert.equal(data.has('lastGatewayError'), false);
 });
+
+
+test('snapshot wake measures service readiness without submitting a task', async () => {
+  const { g, data, events } = fixture();
+  data.set('everStarted', true);
+  data.set('checkpoint', { snapshot: { id: 'saved-snapshot' } });
+  const result = await g.wake();
+  assert.equal(result.started, true);
+  assert.equal(result.measurement.kind, 'snapshot');
+  assert.equal(result.measurement.snapshotId, 'saved-snapshot');
+  assert.ok(result.measurement.serviceReadyMs >= 0);
+  assert.equal(events.find(e => Array.isArray(e) && e[0] === 'start')[1].containerSnapshot.id, 'saved-snapshot');
+  assert.equal(data.has('lastTask'), false);
+});
+
+test('snapshot demo never silently falls back to a fresh image', async () => {
+  const { g, c } = fixture();
+  await assert.rejects(g.wake(), /没有可启动的快照/);
+  assert.equal(c.running, false);
+});
+
+test('already running demo does not fabricate a new startup measurement', async () => {
+  const { g, data } = fixture({ running: true });
+  assert.equal((await g.wake()).started, false);
+  assert.equal(data.has('lastBoot'), false);
+});
+
+test('first visible text timing survives later model calls for the same task', async () => {
+  const { g, data } = fixture({ running: true });
+  data.set('lastTask', { id: 'a', status: 'running', startedAt: Date.now() - 100 });
+  const call = await g.beginModelCall();
+  await g.modelProgress({ ...call, text: 'hello', done: false });
+  const timing = structuredClone(data.get('responseTiming'));
+  assert.ok(timing.firstTextMs >= 100);
+  const next = await g.beginModelCall();
+  await g.modelProgress({ ...next, text: 'next answer', done: true });
+  assert.equal(data.get('responseTiming').firstTextMs, timing.firstTextMs);
+  assert.equal(g.live.dispatchDelayMs, timing.dispatchDelayMs);
+  await g.modelProgress({ ...call, text: 'stale stream', done: true });
+  assert.equal(g.live.text, 'next answer');
+});
+
+test('closing live stream does not stop container or replay task', async () => {
+  const { g, c, events } = fixture({ running: true });
+  const response = await g.events('task-a');
+  const reader = response.body.getReader();
+  await reader.read();
+  await reader.cancel();
+  assert.equal(c.running, true);
+  assert.equal(g.viewers.size, 0);
+  assert.equal(events.includes('destroy'), false);
+});

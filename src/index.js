@@ -2,6 +2,7 @@ import { DurableObject, WorkerEntrypoint } from 'cloudflare:workers';
 import { Lifecycle } from 'agents/lifecycle';
 import { DirectoryBackup } from '@cloudflare/sandbox';
 import { page } from './page.js';
+import { observeChatStream } from './model-stream.js';
 export { DirectoryBackupGateway } from '@cloudflare/sandbox';
 const MINUTE = 60000;
 function diagnosticText(value) {
@@ -19,10 +20,18 @@ export class Outbound extends WorkerEntrypoint {
       delete input.model;
       const model = this.env.AI_MODEL;
       stage = 'ai-binding';
+      const agent = this.env.DSH.getByName('owner');
+      const call = await agent.beginModelCall().catch(() => null);
       if (!model || model.startsWith('@cf/')) throw new Error('Configure AI_MODEL as a Gateway catalog model or dynamic route (OpenAI chat format).');
       const output = await this.env.AI.run(model, input, { gateway: { id: this.env.AI_GATEWAY_ID || 'default', skipCache: true } });
-      if (output instanceof Response) return output;
-      if (output instanceof ReadableStream) return new Response(output, { headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-store' } });
+      const report = update => call ? agent.modelProgress({ ...call, ...update }) : Promise.resolve();
+      if (output instanceof Response) {
+        if (output.ok && output.body && output.headers.get('content-type')?.includes('text/event-stream')) return new Response(observeChatStream(output.body, report), { status: output.status, headers: output.headers });
+        return output;
+      }
+      if (output instanceof ReadableStream) return new Response(observeChatStream(output, report), { headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-store' } });
+      const text = output?.choices?.[0]?.message?.content;
+      await report({ text: typeof text === 'string' ? text : '', done: true }).catch(() => {});
       return Response.json(output);
     } catch (e) {
       const failure = { at: Date.now(), stage, model: String(this.env.AI_MODEL || ''), gateway: String(this.env.AI_GATEWAY_ID || 'default'), message: diagnosticText(e?.message || e), code: e?.code == null ? null : diagnosticText(e.code), status: Number.isInteger(e?.status) ? e.status : null };
@@ -38,6 +47,8 @@ export class DshAgent extends DurableObject {
   lifecycle = Lifecycle.install(this);
   queue = Promise.resolve();
   setup;
+  live = null;
+  viewers = new Set();
   constructor(ctx, env) {
     super(ctx, env);
     this.backups = new DirectoryBackup(ctx.container, ctx.exports.DirectoryBackupGateway, { binding: 'BACKUPS', prefix: 'dsh/' });
@@ -63,6 +74,7 @@ export class DshAgent extends DurableObject {
   async boot() {
     const c = this.ctx.container;
     const fresh = !c.running;
+    let bootMeasurement;
     if (fresh) {
       const lastTask = await this.ctx.storage.get('lastTask');
       if (lastTask?.status === 'running') throw new Error('Previous task lost its runtime. Inspect side effects and explicitly recover from R2; refusing automatic replay.');
@@ -71,6 +83,7 @@ export class DshAgent extends DurableObject {
       const recovering = await this.ctx.storage.get('everStarted');
       if (recovering && !checkpoint) throw new Error('No saved checkpoint exists. Recovery requires inspection; refusing to start empty.');
       // Snapshot failure is explicit. Use the authenticated R2 recovery endpoint if expired.
+      bootMeasurement = { kind: checkpoint?.snapshot ? 'snapshot' : 'image', snapshotId: checkpoint?.snapshot?.id || null, startedAt: Date.now() };
       c.start({ ...(checkpoint?.snapshot ? { containerSnapshot: checkpoint.snapshot } : { image: c.images.dsh }), instance: 'standard-1', entrypoint: ['sleep', 'infinity'], enableInternet: false });
     }
     await c.setInactivityTimeout(5 * MINUTE);
@@ -82,6 +95,7 @@ export class DshAgent extends DurableObject {
       await this.ctx.storage.put({ everStarted: true, networkRevision: 2 });
       // Redirect all output to files: piped exec streams cannot outlive the request.
       await c.exec(['sh', '-c', 'exec node /app/server.mjs >>/data/bridge.log 2>&1'], { stdout: 'ignore', stderr: 'ignore' });
+      bootMeasurement.execAcceptedMs = Date.now() - bootMeasurement.startedAt;
     }
     let ready = false;
     for (let i = 0; i < 40; i++) {
@@ -89,6 +103,7 @@ export class DshAgent extends DurableObject {
       await new Promise(resolve => setTimeout(resolve, 250));
     }
     if (!ready) throw new Error('Bridge is not ready. Inspect container logs; no task was retried.');
+    if (bootMeasurement) { bootMeasurement.readyAt = Date.now(); bootMeasurement.serviceReadyMs = bootMeasurement.readyAt - bootMeasurement.startedAt; await this.ctx.storage.put('lastBoot', bootMeasurement); console.log('DSH_BOOT_TIMING', JSON.stringify(bootMeasurement)); }
     await this.lifecycle.jobs.push({ id: 'inspect', fn: 'inspect', time: Date.now() + MINUTE });
   }
   async submit(body) {
@@ -104,9 +119,66 @@ export class DshAgent extends DurableObject {
       const intent = { id: body.id, status: 'submission-unknown', startedAt: Date.now() };
       await this.ctx.storage.put({ ['request:' + body.id]: intent, lastActivity: Date.now() });
       const r = await this.bridge('/tasks', body); const task = await r.json();
-      if (r.ok) await this.ctx.storage.put({ ['request:' + body.id]: task, lastTask: task });
+      if (r.ok) { this.live = null; await this.ctx.storage.put({ ['request:' + body.id]: task, lastTask: task }); }
       return Response.json(task, { status: r.status });
     });
+  }
+  async wake() {
+    await this.lifecycle.start();
+    return this.exclusive(async () => {
+      if (this.ctx.container.running) return { started: false, reason: 'already running' };
+      const cp = await this.ctx.storage.get('routingRecovery') ?? await this.ctx.storage.get('checkpoint');
+      if (!cp?.snapshot) throw new Error('没有可启动的快照；本按钮不会用空环境冒充快照恢复。');
+      await this.ctx.storage.put('lastActivity', Date.now());
+      await this.ensure();
+      return { started: true, measurement: await this.ctx.storage.get('lastBoot') };
+    });
+  }
+  async beginModelCall() {
+    return this.exclusive(async () => {
+      const task = await this.ctx.storage.get('lastTask');
+      const call = { taskId: task?.id || null, callId: crypto.randomUUID(), startedAt: Date.now(), taskStartedAt: task?.startedAt || null };
+      const previous = await this.ctx.storage.get('responseTiming');
+      const timing = previous?.taskId === call.taskId ? previous : { taskId: call.taskId, firstModelAt: call.startedAt, dispatchDelayMs: task?.startedAt ? call.startedAt - task.startedAt : null };
+      await this.ctx.storage.put('responseTiming', timing);
+      this.live = { ...call, ...timing, text: '', done: false };
+      this.publishLive();
+      return call;
+    });
+  }
+  async modelProgress(update) {
+    if (!this.live || update.callId !== this.live.callId || update.taskId !== this.live.taskId) return;
+    this.live.text = String(update.text || '').slice(0, 160000);
+    this.live.done = !!update.done;
+    if (this.live.text && !this.live.firstTextAt) {
+      this.live.firstTextAt = Date.now();
+      this.live.firstTextMs = this.live.taskStartedAt ? this.live.firstTextAt - this.live.taskStartedAt : null;
+      await this.ctx.storage.put('responseTiming', { taskId: this.live.taskId, firstModelAt: this.live.firstModelAt, dispatchDelayMs: this.live.dispatchDelayMs, firstTextAt: this.live.firstTextAt, firstTextMs: this.live.firstTextMs });
+      console.log('DSH_RESPONSE_TIMING', JSON.stringify({ taskId: this.live.taskId, dispatchDelayMs: this.live.dispatchDelayMs, firstTextMs: this.live.firstTextMs }));
+    }
+    this.publishLive();
+  }
+  publishLive() {
+    const bytes = new TextEncoder().encode('data: ' + JSON.stringify(this.live) + '\n\n');
+    for (const controller of this.viewers) {
+      try { if (controller.desiredSize <= 0) { controller.close(); this.viewers.delete(controller); } else controller.enqueue(bytes); }
+      catch { this.viewers.delete(controller); }
+    }
+  }
+  async events(taskId) {
+    if (!this.ctx.container.running) return new Response('Container stopped', { status: 409 });
+    // Transient view only. Closing this stream never cancels or replays a task.
+    let controller, timer;
+    const stream = new ReadableStream({
+      start: c => {
+        controller = c; this.viewers.add(c);
+        c.enqueue(new TextEncoder().encode(': connected\n\n'));
+        if (this.live?.taskId === taskId) c.enqueue(new TextEncoder().encode('data: ' + JSON.stringify(this.live) + '\n\n'));
+        timer = setTimeout(() => { this.viewers.delete(c); try { c.close(); } catch {} }, 55000);
+      },
+      cancel: () => { clearTimeout(timer); this.viewers.delete(controller); }
+    });
+    return new Response(stream, { headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' } });
   }
   async recordGatewayError(failure) {
     await this.lifecycle.start();
@@ -125,7 +197,7 @@ export class DshAgent extends DurableObject {
       const hasBackup = !!latestBackup;
       const backupAt = await this.ctx.storage.get('latestBackupAt') ?? (latestBackup?.id && latestBackup.id === cp?.backup?.id ? cp.at : null);
       const lastActivity = await this.ctx.storage.get('lastActivity');
-      return { ...info, hasBackup, backupAt, idleShutdownAt: this.ctx.container.running && !info.busy && lastActivity ? lastActivity + 10 * MINUTE : null, running: this.ctx.container.running, checkpointAt: cp?.at ?? null, checkpointError: await this.ctx.storage.get('checkpointError') ?? null, lastGatewayError: await this.ctx.storage.get('lastGatewayError') ?? null, modelConfig: { model: this.env.AI_MODEL || null, gateway: this.env.AI_GATEWAY_ID || 'default' } };
+      return { ...info, live: this.live?.taskId === info.task?.id ? this.live : null, lastBoot: await this.ctx.storage.get('lastBoot') ?? null, responseTiming: await this.ctx.storage.get('responseTiming') ?? null, hasBackup, backupAt, idleShutdownAt: this.ctx.container.running && !info.busy && lastActivity ? lastActivity + 10 * MINUTE : null, running: this.ctx.container.running, checkpointAt: cp?.at ?? null, checkpointError: await this.ctx.storage.get('checkpointError') ?? null, lastGatewayError: await this.ctx.storage.get('lastGatewayError') ?? null, modelConfig: { model: this.env.AI_MODEL || null, gateway: this.env.AI_GATEWAY_ID || 'default' } };
     });
   }
   async readHistory() {
@@ -219,6 +291,7 @@ export class DshAgent extends DurableObject {
         // The visible result must come from restored files, not the newer DO cache.
         await this.ctx.storage.put('lastTask', restoredInfo.task || null);
         await this.ctx.storage.delete('lastGatewayError');
+        await this.ctx.storage.delete('responseTiming'); this.live = null;
       } finally { await c.destroy(); this.setup = undefined; }
       return { recovered: true, note: 'Next task starts DSH and validates session compatibility. No task was replayed.' };
     });
@@ -253,7 +326,9 @@ export default {
     const agent = env.DSH.getByName('owner');
     try {
       let response;
-      if (u.pathname === '/api/history' && request.method === 'GET') response = Response.json(await agent.history());
+      if (u.pathname === '/api/events' && request.method === 'GET') response = await agent.events(u.searchParams.get('taskId'));
+      else if (u.pathname === '/api/wake' && request.method === 'POST') response = Response.json(await agent.wake());
+      else if (u.pathname === '/api/history' && request.method === 'GET') response = Response.json(await agent.history());
       else if (u.pathname === '/api/status' && request.method === 'GET') response = Response.json(await agent.status());
       else if (u.pathname === '/api/tasks' && request.method === 'POST') { if (Number(request.headers.get('content-length')) > 32768) return new Response('Too large', { status: 413 }); const text = await request.text(); if (text.length > 32768) return new Response('Too large', { status: 413 }); response = await agent.submit(JSON.parse(text)); }
       else if (u.pathname === '/api/checkpoint' && request.method === 'POST') response = Response.json(await agent.checkpoint());
