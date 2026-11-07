@@ -8,6 +8,8 @@ const source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8
 const stripped = source.replace(/^import .*;\n/gm, '').replace(/^export \{ DirectoryBackupGateway \} from .*;\n/gm, '');
 const prelude = `
 const page = '';
+const previewServer = '';
+const previewHeaders = () => ({});
 class DurableObject { constructor(ctx, env) { this.ctx = ctx; this.env = env; } }
 class WorkerEntrypoint {}
 const Lifecycle = { install() { return { async start() {}, jobs: { async push() {} } }; } };
@@ -246,4 +248,21 @@ test('legacy task without a control-clock anchor is unmeasured, not guessed', as
   await g.modelProgress({ ...call, text: 'answer', done: true });
   assert.equal(data.get('responseTiming').dispatchDelayMs, null);
   assert.equal(data.get('responseTiming').firstTextMs, null);
+});
+
+
+test('preview rejects absolute and hidden directories before starting the runtime', async () => {
+  const { g, c } = fixture();
+  for (const root of ['/data', '../', '.secret', 'site/../other']) await assert.rejects(g.previewStart({root}), /相对目录/);
+  assert.equal(c.running, false);
+});
+
+test('old preview links never wake a sleeping container', async () => {
+  const { g, c, data } = fixture();
+  data.set('previewConfig', { id:'active' });
+  assert.equal((await g.previewFile('old','index.html')).status,404);
+  assert.equal((await g.previewFile('active','index.html')).status,409);
+  assert.equal(c.running,false);
+  await g.previewClose();
+  assert.equal(data.has('previewConfig'),false);
 });

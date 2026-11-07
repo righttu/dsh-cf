@@ -64,7 +64,7 @@ R2 数据在主动删除前保留并计费；原生快照按平台 TTL 过期。
 
 不允许 GitHub、npm 或通用公网访问；网页搜索工具已禁用。工具链在镜像构建时安装。Node 通过 Container 运行时 CA 信任 HTTPS 拦截。容器只有不含密钥的 SDK 占位字符串；不接触 Cloudflare token 或供应商 key。凭据不暴露不等于无费用风险，必须在 Gateway 设置预算与限流。
 
-Worker 通过 `ctx.access` 确认平台已验证请求，再读取邮箱身份；不相信请求自行提供的邮箱头。所有页面和 API 均需 Access；POST 还必须来自同源。当前无 Static Assets 或 Service Binding 中转；如未来增加，注意官方文档中 `ctx.access` 不传播的限制，不能直接沿用此判断。HTTP Bridge 无公开预览端口。页面使用 textContent，不渲染模型 HTML。
+Worker 通过 `ctx.access` 确认平台已验证请求，再读取邮箱身份；不相信请求自行提供的邮箱头。所有页面和 API 均需 Access；POST 还必须来自同源。当前无 Static Assets 或 Service Binding 中转；如未来增加，注意官方文档中 `ctx.access` 不传播的限制，不能直接沿用此判断。HTTP Bridge 不对外开放。静态网页由独立的受控预览服务提供（见下文），模型回复仍用 textContent，不渲染进管理界面。
 
 ## 构建与验收
 
@@ -144,3 +144,16 @@ Bridge 的准备日志 `DSH_PREPARE_TIMING` 写入容器 `/data/bridge.log`；Wo
 ## 响应计时口径修正（timing-v2）
 
 旧统计混用了容器 task.startedAt 与 Durable Object 的时钟，跨环境时钟偏移会产生约几十毫秒负值。新任务从控制层提交任务时持久化同一控制层时钟的起点，到首次模型调用/首次公开文本都在同一控制层计时。它不包括之前的 Snapshot 启动；包含任务提交与状态写入开销。旧任务缺少起点时返回 null，不将负值截成零伪造数据。页面不展示负耗时。进入 SDK run 到模型调用前的区间由 Bridge 的单调时钟在状态查询时计算，不再做跨时钟相减；没有新版 Bridge 则该项未知。
+
+
+## 隔离的静态网页预览
+
+工作台的“网页预览”接受 /data/workspace 内的相对目录，要求 index.html。输入 coffee-site（根目录用 .），点击打开 / 刷新预览。示例任务按钮可让 DSH 创建无外部依赖的测试网页，绝不在部署时自动执行任务或覆盖用户文件。
+
+Worker 经 Access 验证后，以受控 exec 启动 Node 静态服务（8090）并设置随机能力头；不会公开 8080 DSH Bridge，也不会开放任意端口、互联网、部署 Token 或 Docker。脚本包含在 Worker 中，因此旧镜像/旧快照也可启动预览，不需以升级为由覆盖工作区或进行 R2 恢复。配置/能力头持久保存在 DO 中；服务进程不随快照恢复。仅显式打开时启动服务，旧链接不自动唤醒；每次打开产生新 ID，关闭后旧链接失效。
+
+预览路由仅支持 GET，文件限制在选定目录，realpath 检查阻止符号链接逃逸，隐藏文件和非白名单类型不提供，单文件最多 5 MiB。不转发 Cookie/Access/Authorization 等浏览器请求头给容器。读取成功更新空闲时间；保存/休眠仍会停止预览，需显式重新打开。
+
+安全隔离：iframe sandbox 只允许 scripts，不允许 same-origin/forms/popups/top-navigation；预览响应自身也有 CSP sandbox（新窗口同样生效）、connect-src none、frame-src none、form-action none、无缓存、nosniff。Origin:null 仅允许预览只读路由，管理 API 继续要求同源。不能把 allow-same-origin 加回去；需要完整模块/HMR/API 支持时，应先提供独立预览域名和独立认证策略。
+
+本版本仅预览 HTML/CSS/普通 JS 和本地图片字体，使用相对资源路径；不安装依赖、不构建、不代理后端 API、不支持外部 CDN、ES 模块开发服务器或 Vite HMR，也不等于正式网站发布。浏览器实际显示/Access 子资源加载仍需真实登录验收。

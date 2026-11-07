@@ -2,6 +2,7 @@ import { DurableObject, WorkerEntrypoint } from 'cloudflare:workers';
 import { Lifecycle } from 'agents/lifecycle';
 import { DirectoryBackup } from '@cloudflare/sandbox';
 import { page } from './page.js';
+import { previewServer, previewHeaders } from './preview.js';
 import { observeChatStream } from './model-stream.js';
 export { DirectoryBackupGateway } from '@cloudflare/sandbox';
 const MINUTE = 60000;
@@ -132,6 +133,57 @@ export class DshAgent extends DurableObject {
       await this.ctx.storage.put('lastActivity', Date.now());
       await this.ensure();
       return { started: true, measurement: await this.ctx.storage.get('lastBoot') };
+    });
+  }
+  async previewStart(body) {
+    const root = body?.root === '.' ? '' : body?.root;
+    if (typeof root !== 'string' || root.length > 240 || root.startsWith('/') || root.includes('\\') || root.split('/').some(x => x.startsWith('.'))) throw new Error('请输入工作区内的相对目录，例如 coffee-site 或 dist；工作区根目录填 .');
+    await this.lifecycle.start();
+    return this.exclusive(async () => {
+      await this.ensure();
+      const secret = await this.ctx.storage.get('previewSecret') || crypto.randomUUID();
+      await this.ctx.storage.put('previewSecret', secret);
+      const port = this.ctx.container.getTcpPort(8090);
+      const options = { headers: { 'x-dsh-preview': secret } };
+      let ready = false;
+      try { const r = await port.fetch('http://preview/_health', options); ready = r.ok && await r.text() === 'dsh-static-preview-v1'; } catch {}
+      if (!ready) {
+        await this.ctx.container.exec(['node', '--input-type=module', '-e', previewServer], { env: { DSH_PREVIEW_SECRET: secret }, stdout: 'ignore', stderr: 'ignore' });
+        for (let i = 0; i < 30; i++) {
+          try { const r = await port.fetch('http://preview/_health', options); if (r.ok && await r.text() === 'dsh-static-preview-v1') { ready = true; break; } } catch {}
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+      }
+      if (!ready) throw new Error('预览服务未启动；8090 端口可能已被占用。未停止或替换任何已有服务。');
+      const r = await port.fetch('http://preview/_configure', { method: 'POST', headers: { ...options.headers, 'content-type': 'application/json' }, body: JSON.stringify({ root }) });
+      if (!r.ok) throw new Error('目录不可预览：请确认目录存在、含 index.html，且文件位于 /data/workspace 内。');
+      const config = { id: crypto.randomUUID(), root: root || '.', at: Date.now() };
+      await this.ctx.storage.put({ previewConfig: config, lastActivity: Date.now() });
+      return { ...config, url: '/preview/' + config.id + '/index.html' };
+    });
+  }
+  async previewFile(id, pathname) {
+    return this.exclusive(async () => {
+      const config = await this.ctx.storage.get('previewConfig');
+      if (!config || config.id !== id) return new Response('预览已关闭或已更新，请在工作台重新打开。', { status: 404 });
+      if (!this.ctx.container.running) return new Response('环境已休眠。请回工作台点击打开预览；不会为旧链接自动启动容器。', { status: 409 });
+      const secret = await this.ctx.storage.get('previewSecret');
+      // Only GET on the dedicated static server; never proxy the DSH bridge or caller headers.
+      let response;
+      try { response = await this.ctx.container.getTcpPort(8090).fetch('http://preview/' + pathname, { headers: { 'x-dsh-preview': secret } }); }
+      catch { return new Response('预览进程已停止，请回工作台重新打开预览。', { status: 503 }); }
+      if (response.ok) await this.ctx.storage.put('lastActivity', Date.now());
+      return new Response(response.body, { status: response.status, headers: { ...previewHeaders(), 'content-type': response.headers.get('content-type') || 'text/plain; charset=utf-8' } });
+    });
+  }
+  async previewClose() {
+    return this.exclusive(async () => {
+      await this.ctx.storage.delete('previewConfig');
+      if (this.ctx.container.running) {
+        const secret = await this.ctx.storage.get('previewSecret');
+        try { await this.ctx.container.getTcpPort(8090).fetch('http://preview/_configure', { method: 'POST', headers: { 'x-dsh-preview': secret }, body: JSON.stringify({ root: null }) }); } catch {}
+      }
+      return { closed: true };
     });
   }
   async beginModelCall() {
@@ -325,13 +377,26 @@ export default {
     const identity = await ctx.access.getIdentity();
     if (!identity?.email) return new Response('Email identity required', { status: 403 });
     const u = new URL(request.url);
-    if (u.pathname === '/' && request.method === 'GET') return new Response(page, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer', 'content-security-policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'" } });
+    if (u.pathname === '/' && request.method === 'GET') return new Response(page, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer', 'content-security-policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-src 'self'; base-uri 'none'; frame-ancestors 'none'" } });
+    // Preview documents have an opaque sandbox origin; only their read-only route accepts Origin:null.
+    const preview = /^\/preview\/([a-f0-9-]{36})\/(.*)$/.exec(u.pathname);
+    if (preview && request.method === 'GET') {
+      const response = await env.DSH.getByName('owner').previewFile(preview[1], preview[2]);
+      for (const [key, value] of Object.entries(previewHeaders())) response.headers.set(key, value);
+      return response;
+    }
     if (request.method !== 'GET' && request.headers.get('origin') !== u.origin) return new Response('Origin required', { status: 403 });
     if (request.headers.get('origin') && request.headers.get('origin') !== u.origin) return new Response('Origin denied', { status: 403 });
     const agent = env.DSH.getByName('owner');
     try {
       let response;
       if (u.pathname === '/api/events' && request.method === 'GET') response = await agent.events(u.searchParams.get('taskId'));
+      else if (u.pathname === '/api/preview/open' && request.method === 'POST') {
+        const text = await request.text();
+        if (text.length > 2048) return new Response('Too large', { status: 413 });
+        response = Response.json(await agent.previewStart(JSON.parse(text)));
+      }
+      else if (u.pathname === '/api/preview/close' && request.method === 'POST') response = Response.json(await agent.previewClose());
       else if (u.pathname === '/api/wake' && request.method === 'POST') response = Response.json(await agent.wake());
       else if (u.pathname === '/api/history' && request.method === 'GET') response = Response.json(await agent.history());
       else if (u.pathname === '/api/status' && request.method === 'GET') response = Response.json(await agent.status());
