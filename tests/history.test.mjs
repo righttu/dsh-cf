@@ -50,3 +50,9 @@ test('history preview fits Durable Object value size without truncating persiste
   assert.equal(view.entries.at(-1).truncated, true);
   assert.equal(state.history[0].prompt.length, 16000);
 });
+
+test('presentation removes requested explanatory copy without hiding backup controls', () => {
+ for (const text of ['最近成功保存时的记录','DSH 对话标识：','显示最近最多 50 条任务与最终回复','单所有者工作区 / 实验版','需审批操作默认拒绝','保存失败会提示并重试。R2 不是实时同步。','新任务统一以控制层时钟计时','初始化包括 DSH 启动与握手','DEEPSEEK HARNESS · CLOUDFLARE','让想法，成为实际成果。','执行任务、查看成果，保存后可从快照或 R2 恢复。']) assert.equal(page.includes(text),false,text);
+ for (const id of ['snapshots','save','recover','checkpoint-time','backup-time','dispatch-ms','history-list']) assert.ok(page.includes('id="'+id+'"'),id);
+ assert.equal(page.includes('class="advanced card"'),false);
+});
