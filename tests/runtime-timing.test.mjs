@@ -31,7 +31,7 @@ test('actual bridge session preparation initializes once then reports runtime re
       async close() {}
     }
   `);
-  for (const name of ['timing.mjs', 'history.mjs']) source = source.replace("'./" + name + "'", JSON.stringify(new URL('../container/' + name, import.meta.url).href));
+  for (const name of ['timing.mjs', 'history.mjs', 'approvals.mjs']) source = source.replace("'./" + name + "'", JSON.stringify(new URL('../container/' + name, import.meta.url).href));
   source += '\nexport { getSession, closeHarness };\n';
   const module = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
   const first = {}, second = {};

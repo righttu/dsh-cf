@@ -34,7 +34,7 @@
 - 镜像由 Workers Builds 从 Dockerfile 构建。运行时用 `ctx.container.images.dsh` 的 digest 引用。
 - 一个所有者、一个容器、固定 root Session `primary`、一次一个任务。容器是安全边界；Linux UID 不是此调度策略下的强隔离。
 - `/data/dsh-home` 放 DSH 配置、会话；`/data/workspace` 放工作文件；`/data/state.json` 原子保存 Bridge 的任务原文、最终回复、状态、历史列表与 Session ID；DSH 内部上下文仍由官方 Harness 管理。
-- 浏览器每 5 秒查询状态；当前只展示最近一个任务，不是完整 DSH Web UI，不提供 token 流和审批 UI。需审批动作默认拒绝；用户问题默认取消。
+- 浏览器查询状态并显示当前任务、历史和可见回复流。新版 Bridge 提供单次权限审批 UI；用户问题仍默认取消。旧快照中的 Bridge 不会因 Worker 发布自动升级。
 - `/api/tasks` 接受调用者生成的 UUID；DO 先记录请求意图。同一 ID 不会重新执行。网络超时不是回滚，不能直接换 ID 重试。
 - DSH 官方 SDK 没有逐 Prompt cancel；关闭页面不会停止任务。不要启动无限任务或无人值守高风险操作。
 
@@ -164,3 +164,7 @@ Worker 经 Access 验证后，以受控 exec 启动 Node 静态服务（8090）�
 权限：SDK approval/request 原样展示工具、会话、调用标识和原因，用户选择 allowed-once 或 rejected。SDK 不提供完整工具参数，原因并非可信完整命令；不确定时拒绝。申请 5 分钟过期取消，重启未完成审批取消，不自动恢复授权或重放任务，完成任务清理待决审批；记录保存在 /data/state.json。审批只允许工具这次操作，不改变容器 Outbound 策略；真实网络结果由工具报告，界面不模拟 403。用户批准的工具操作可能删除/修改文件，审批不是路径级安全隔离。
 Chromium 在容器内以 --no-sandbox 启动（外层容器仍为隔离边界），不用于浏览不可信公网。Playwright 在镜像构建期安装，运行时不下载浏览器或依赖。浏览器采用与网站预览相同的主要 CSP。测试脚本约定的 data-testid 见 /app/site-check.mjs。
 重要：Worker 发布不替换旧快照镜像。新审批 Bridge 与 Chromium 需要当前新版镜像：必须先成功保存所需数据，再显式从 R2 恢复来切换；不自动销毁旧环境、不假装旧快照已有这些功能。
+
+## 自定义域名
+主入口配置为 https://dsh.righttu.uk（Wrangler routes custom_domain）。保留 workers_dev:true 作为迁移期间备用入口。部署需要 righttu.uk 是同账户的有效 Cloudflare zone，且构建部署凭据具备创建 Custom Domain 所需权限；已有冲突 CNAME 不会在代码中擅自删除。域名记录和证书由 Custom Domains 管理，不需要手工把 CNAME 指向 workers.dev。
+继续使用 Worker 级 Access / All traffic 时，新 Custom Domain 也受同一策略保护；如果现有应用只按旧 hostname 保护，账户所有者需在 Access 为新域名配置相同的邮箱允许策略。应用仍强制检查 ctx.access，未认证请求拒绝，不添加 Bypass。域名实际解析、证书和登录需部署后验证。
