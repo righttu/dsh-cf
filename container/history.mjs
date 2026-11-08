@@ -25,7 +25,7 @@ export function historyView(state) {
   const entries = [];
   let bytes = 0;
   for (const task of history.slice(-50).reverse()) {
-    const entry = { ...task };
+    const entry = { ...normalizeTask(task) };
     for (const key of ['prompt', 'response', 'error']) {
       if (typeof entry[key] === 'string' && entry[key].length > 4000) {
         entry[key] = entry[key].slice(0, 4000); entry.truncated = true;
