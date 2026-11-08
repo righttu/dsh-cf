@@ -1,7 +1,22 @@
+// Only bounded structural metadata; no prompts, reasoning, tool arguments or credentials.
+export function chatResponseMeta(event) {
+  const choice = event?.choices?.find(c => c.index === 0) ?? event?.choices?.[0];
+  const message = choice?.delta ?? choice?.message;
+  const usage = {};
+  for (const key of ['prompt_tokens','completion_tokens','total_tokens']) if (Number.isFinite(event?.usage?.[key])) usage[key] = event.usage[key];
+  const reasoningTokens = event?.usage?.completion_tokens_details?.reasoning_tokens;
+  if (Number.isFinite(reasoningTokens)) usage.reasoning_tokens = reasoningTokens;
+  const reason = choice?.finish_reason;
+  return { hasChoices: Array.isArray(event?.choices), wrappedResult: !!event?.result, finishReason: typeof reason === 'string' && /^[a-z_-]{1,40}$/i.test(reason) ? reason : null,
+    contentChars: typeof message?.content === 'string' ? message.content.length : 0,
+    reasoningPresent: typeof message?.reasoning_content === 'string' && !!message.reasoning_content,
+    toolCallsPresent: !!message?.tool_calls?.length, errorPresent: !!event?.error, usage };
+}
 // Observe public answer text while preserving the original model stream byte-for-byte.
 // Never forward reasoning, tool arguments, or other raw provider payloads to the UI.
-export function observeChatStream(body, report) {
+export function observeChatStream(body, report, reportMeta = () => {}) {
   const decoder = new TextDecoder();
+  const meta = { hasChoices: false, wrappedResult: false, frames: 0, finishReason: null, contentChars: 0, reasoningPresent: false, toolCallsPresent: false, errorPresent: false, usage: {} };
   let buffer = '', text = '', lastSent = 0, first = true;
   async function emit(done = false) {
     if (!done && !first && Date.now() - lastSent < 120) return;
@@ -12,6 +27,10 @@ export function observeChatStream(body, report) {
     const data = frame.split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n');
     if (!data || data === '[DONE]') return;
     let event; try { event = JSON.parse(data); } catch { return; }
+    const part = chatResponseMeta(event); meta.frames++; meta.hasChoices ||= part.hasChoices; meta.wrappedResult ||= part.wrappedResult;
+    meta.finishReason = part.finishReason || meta.finishReason; meta.contentChars += part.contentChars;
+    for (const key of ['reasoningPresent','toolCallsPresent','errorPresent']) meta[key] ||= part[key];
+    Object.assign(meta.usage, part.usage);
     const choice = event.choices?.find(c => c.index === 0) ?? event.choices?.[0];
     const delta = choice?.delta?.content;
     if (typeof delta === 'string' && delta) {
@@ -29,6 +48,6 @@ export function observeChatStream(body, report) {
       while ((end = buffer.indexOf('\n\n')) >= 0) { const value = buffer.slice(0, end); buffer = buffer.slice(end + 2); await frame(value); }
       if (buffer.length > 1048576) buffer = ''; // Bound malformed/non-SSE telemetry buffering.
     },
-    async flush() { buffer += decoder.decode(); if (buffer.trim()) await frame(buffer); await emit(true); }
+    async flush() { buffer += decoder.decode(); if (buffer.trim()) await frame(buffer); await emit(true); try { await reportMeta(meta); } catch {} }
   }));
 }

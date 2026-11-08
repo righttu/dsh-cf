@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { ApprovalQueue } from './approvals.mjs';
 import { timeStage } from './timing.mjs';
-import { updateHistory, historyView } from './history.mjs';
+import { updateHistory, historyView, normalizeTask } from './history.mjs';
 import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
 import { DeepSeekHarness } from '@deepseek-ai/dsh-sdk-client';
 
@@ -58,7 +58,8 @@ async function run(prompt) {
     const failed = result.finishReason === 'error';
     const error = failed ? (safeDiagnostic(terminal?.data?.reason) || result.finalResponse || 'DSH returned error without a terminal diagnostic; inspect AI Gateway logs.') : undefined;
     state.task = { ...state.task, status: failed ? 'failed' : result.finishReason === 'aborted' ? 'interrupted' : 'completed', response: result.finalResponse, finishReason: result.finishReason, ...(failed ? { error } : {}) };
-    if (failed) console.error('DSH task failed', state.task.id, error);
+    state.task = normalizeTask(state.task);
+    if (state.task.status === 'failed') console.error('DSH task failed', state.task.id, state.task.error);
   } catch (e) {
     state.task = { ...state.task, status: 'failed', error: String(e.message).slice(0, 4000) };
     try { await closeHarness(); } catch (closeError) { state.task.error += '; Shutdown failed: ' + closeError.message; }

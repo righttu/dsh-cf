@@ -170,3 +170,6 @@ Worker 经 Access 验证后，以受控 exec 启动 Node 静态服务（8090）�
 继续使用 Worker 级 Access / All traffic 时，新 Custom Domain 也受同一策略保护；如果现有应用只按旧 hostname 保护，账户所有者需在 Access 为新域名配置相同的邮箱允许策略。应用仍强制检查 ctx.access，未认证请求拒绝，不添加 Bypass。域名实际解析、证书和登录需部署后验证。
 
 本次只迁移自检浏览器，不实现自动镜像升级，不修改 saveAndStop/recover/boot 的升级与数据选择语义。BROWSER binding 的实际可用性、私有 outboundByHost 路由及 CDP 流程需 Cloudflare 真实运行验收；单元测试不证明这些线上链路已通过。
+
+## 无最终回复与结束原因
+completed 不是仅看 SDK 是否抛异常：max-tokens/length 或没有最终公开回复都显示失败，不自动重试，不清空 DSH 会话或改动文件。Worker 对旧 Bridge 的状态和历史也执行该展示修正，因此不用为了获得新诊断而重建容器。新增 DSH_MODEL_REQUEST_META / DSH_MODEL_RESPONSE_META / DSH_MODEL_RESULT_META，仅记录预算字段、HTTP 状态、返回结构、finish_reason、公开回复字符数量、是否含推理/工具调用以及数字 token 用量；不记录对话、推理正文、工具参数或凭据。原始模型流仍逐字节透传，未调整模型、token 上限、路由或 reasoning 设置。max-tokens 是 DSH 报告的结束原因，并不单独证明真实预算耗尽；需对照上游 finish_reason/usage 和返回结构继续定位。

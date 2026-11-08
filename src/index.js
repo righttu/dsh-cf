@@ -2,8 +2,9 @@ import { DurableObject, WorkerEntrypoint } from 'cloudflare:workers';
 import { Lifecycle } from 'agents/lifecycle';
 import { DirectoryBackup } from '@cloudflare/sandbox';
 import { page } from './page.js';
+import { normalizeTask } from '../container/history.mjs';
 import { previewServer, previewHeaders } from './preview.js';
-import { observeChatStream } from './model-stream.js';
+import { observeChatStream, chatResponseMeta } from './model-stream.js';
 import { checkWebsite } from './browser-check.js';
 export { DirectoryBackupGateway } from '@cloudflare/sandbox';
 const MINUTE = 60000;
@@ -24,6 +25,7 @@ export class Outbound extends WorkerEntrypoint {
     try {
       const input = await request.json();
       delete input.model;
+      console.log('DSH_MODEL_REQUEST_META', JSON.stringify({ stream: input.stream === true, max_tokens: Number.isFinite(input.max_tokens) ? input.max_tokens : null, max_completion_tokens: Number.isFinite(input.max_completion_tokens) ? input.max_completion_tokens : null }));
       const model = this.env.AI_MODEL;
       stage = 'ai-binding';
       const agent = this.env.DSH.getByName('owner');
@@ -31,11 +33,17 @@ export class Outbound extends WorkerEntrypoint {
       if (!model || model.startsWith('@cf/')) throw new Error('Configure AI_MODEL as a Gateway catalog model or dynamic route (OpenAI chat format).');
       const output = await this.env.AI.run(model, input, { gateway: { id: this.env.AI_GATEWAY_ID || 'default', skipCache: true } });
       const report = update => call ? agent.modelProgress({ ...call, ...update }) : Promise.resolve();
+      const reportMeta = metadata => console.log('DSH_MODEL_RESULT_META', JSON.stringify({ taskId: call?.taskId ?? null, ...metadata }));
       if (output instanceof Response) {
-        if (output.ok && output.body && output.headers.get('content-type')?.includes('text/event-stream')) return new Response(observeChatStream(output.body, report), { status: output.status, headers: output.headers });
+        console.log('DSH_MODEL_RESPONSE_META', JSON.stringify({ taskId: call?.taskId ?? null, status: output.status, eventStream: !!output.headers.get('content-type')?.includes('text/event-stream') }));
+        if (output.ok && output.body && output.headers.get('content-type')?.includes('text/event-stream')) return new Response(observeChatStream(output.body, report, reportMeta), { status: output.status, headers: output.headers });
+        if (output.headers.get('content-type')?.includes('application/json')) {
+          try { reportMeta(chatResponseMeta(await output.clone().json())); } catch {}
+        }
         return output;
       }
-      if (output instanceof ReadableStream) return new Response(observeChatStream(output, report), { headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-store' } });
+      if (output instanceof ReadableStream) return new Response(observeChatStream(output, report, reportMeta), { headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-store' } });
+      reportMeta(chatResponseMeta(output));
       const text = output?.choices?.[0]?.message?.content;
       await report({ text: typeof text === 'string' ? text : '', done: true }).catch(() => {});
       return Response.json(output);
@@ -288,8 +296,9 @@ export class DshAgent extends DurableObject {
       let info = { task: await this.ctx.storage.get('lastTask') ?? null, busy: false };
       if (this.ctx.container.running) {
         info = await (await this.bridge('/status')).json();
-        if (info.task) await this.rememberTask(info.task);
+        if (info.task) { info.task = normalizeTask(info.task); await this.rememberTask(info.task); }
       }
+      info.task = normalizeTask(info.task);
       const cp = await this.ctx.storage.get('checkpoint');
       const latestBackup = await this.ctx.storage.get('latestBackup');
       const hasBackup = !!latestBackup;
@@ -306,13 +315,13 @@ export class DshAgent extends DurableObject {
     if (!r.ok) throw new Error('无法读取容器中的任务历史');
     const data = await r.json();
     if (!Array.isArray(data.entries)) throw new Error('历史数据格式不正确');
-    return { available: true, entries: data.entries, total: data.total, sessionId: data.sessionId || null, readAt: Date.now() };
+    return { available: true, entries: data.entries.map(normalizeTask), total: data.total, sessionId: data.sessionId || null, readAt: Date.now() };
   }
   async history() {
     return this.exclusive(async () => {
       if (this.ctx.container.running) return { ...(await this.readHistory()), source: 'container' };
       const saved = await this.ctx.storage.get('checkpointHistory');
-      return saved ? { ...saved, source: saved.restoredAt ? 'r2-restored' : 'saved', running: false }
+      return saved ? { ...saved, entries: saved.entries?.map(normalizeTask) || [], source: saved.restoredAt ? 'r2-restored' : 'saved', running: false }
         : { available: false, entries: [], total: 0, source: 'unknown', reason: '尚无可核验的历史记录。不会为查看历史自动启动容器。' };
     });
   }

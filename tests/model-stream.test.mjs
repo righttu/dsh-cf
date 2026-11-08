@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { observeChatStream } from '../src/model-stream.js';
+import { observeChatStream, chatResponseMeta } from '../src/model-stream.js';
 const encoder = new TextEncoder();
 const frame = delta => 'data: ' + JSON.stringify({ choices: [{ index: 0, delta }] }) + '\r\n\r\n';
 
@@ -35,4 +35,16 @@ test('UI telemetry failure does not fail the harness model stream', async () => 
   const source = new ReadableStream({ start(c) { c.enqueue(encoder.encode(input)); c.close(); } });
   const output = await new Response(observeChatStream(source, () => { throw Error('telemetry disconnected'); })).text();
   assert.equal(output, input);
+});
+
+test('model diagnostics report structural evidence, never reasoning or tool arguments', async () => {
+ const event={choices:[{index:0,delta:{content:'',reasoning_content:'private thinking',tool_calls:[{function:{arguments:'private operation'}}]},finish_reason:'length'}],usage:{prompt_tokens:10,completion_tokens:20,completion_tokens_details:{reasoning_tokens:20}}};
+ const meta=chatResponseMeta(event);
+ assert.equal(meta.finishReason,'length');assert.equal(meta.reasoningPresent,true);assert.equal(meta.usage.reasoning_tokens,20);
+ assert.doesNotMatch(JSON.stringify(meta),/private/);
+ const sse='data: '+JSON.stringify(event)+'\n\ndata: [DONE]\n\n';
+ let final;
+ const stream=new ReadableStream({start(c){c.enqueue(new TextEncoder().encode(sse));c.close()}});
+ assert.equal(await new Response(observeChatStream(stream,()=>{},m=>{final=m})).text(),sse);
+ assert.equal(final.finishReason,'length');assert.equal(final.contentChars,0);assert.equal(final.reasoningPresent,true);
 });

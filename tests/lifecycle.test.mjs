@@ -7,6 +7,7 @@ import { readFile } from 'node:fs/promises';
 const source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8');
 const stripped = source.replace(/^import .*;\n/gm, '').replace(/^export \{ DirectoryBackupGateway \} from .*;\n/gm, '');
 const prelude = `
+import { normalizeTask } from ${JSON.stringify(new URL('../container/history.mjs', import.meta.url).href)};
 const page = '';
 const previewServer = '';
 const previewHeaders = () => ({});

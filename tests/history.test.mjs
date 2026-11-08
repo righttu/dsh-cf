@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Script } from 'node:vm';
 import { page } from '../src/page.js';
-import { updateHistory, historyView } from '../container/history.mjs';
+import { updateHistory, historyView, normalizeTask } from '../container/history.mjs';
 
 test('page embedded JavaScript parses and element references exist', () => {
   const script = page.match(/<script>([\s\S]*?)<\/script>/)[1];
@@ -55,4 +55,15 @@ test('presentation removes requested explanatory copy without hiding backup cont
  for (const text of ['最近成功保存时的记录','DSH 对话标识：','显示最近最多 50 条任务与最终回复','单所有者工作区 / 实验版','需审批操作默认拒绝','保存失败会提示并重试。R2 不是实时同步。','新任务统一以控制层时钟计时','初始化包括 DSH 启动与握手','DEEPSEEK HARNESS · CLOUDFLARE','让想法，成为实际成果。','执行任务、查看成果，保存后可从快照或 R2 恢复。']) assert.equal(page.includes(text),false,text);
  for (const id of ['snapshots','save','recover','checkpoint-time','backup-time','dispatch-ms','history-list']) assert.ok(page.includes('id="'+id+'"'),id);
  assert.equal(page.includes('class="advanced card"'),false);
+});
+
+test('max-tokens and empty final answers are not reported as successful, even in legacy history', () => {
+ const task = {id:'a', prompt:'hi', status:'completed', finishReason:'max-tokens',response:''};
+ assert.equal(normalizeTask(task).status,'failed');
+ assert.match(normalizeTask(task).error,/max-tokens/);
+ assert.equal(task.status,'completed');
+ assert.equal(historyView({history:[task]}).entries[0].status,'failed');
+ assert.equal(normalizeTask({...task,finishReason:'completed'}).status,'failed');
+ assert.equal(normalizeTask({...task,finishReason:'completed',response:'hello'}).status,'completed');
+ for(const status of ['running','interrupted','failed']) assert.equal(normalizeTask({...task,status}).status,status);
 });
