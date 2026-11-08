@@ -2,16 +2,61 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "dsh",
   "workers_dev": true,
-  "routes": [{ "pattern": "dsh.righttu.uk", "custom_domain": true }],
+  "routes": [
+    {
+      "pattern": "dsh.righttu.uk",
+      "custom_domain": true
+    }
+  ],
   "main": "src/index.js",
   "compatibility_date": "2026-11-07",
-  "compatibility_flags": ["nodejs_compat"],
-  "observability": { "enabled": true },
+  "compatibility_flags": [
+    "nodejs_compat",
+    "enable_ctx_exports"
+  ],
+  "observability": {
+    "enabled": true
+  },
   "upload_source_maps": true,
-  "vars": { "AI_GATEWAY_ID": "dsh-cf", "AI_MODEL": "dynamic/dsh" },
-  "ai": { "binding": "AI" },
-  "containers": [{ "class_name": "DshAgent", "scheduling_policy": "durable_object", "images": { "dsh": { "dockerfile": "./Dockerfile" } } }],
-  "durable_objects": { "bindings": [{ "name": "DSH", "class_name": "DshAgent" }] },
-  "exports": { "DshAgent": { "type": "durable-object", "storage": "sqlite" } },
-  "r2_buckets": [{ "binding": "BACKUPS", "bucket_name": "dsh-cf-backups" }]
+  "vars": {
+    "AI_GATEWAY_ID": "dsh-cf",
+    "AI_MODEL": "dynamic/dsh"
+  },
+  "ai": {
+    "binding": "AI"
+  },
+  "containers": [
+    {
+      "class_name": "DshAgent",
+      "scheduling_policy": "durable_object",
+      "images": {
+        "dsh": {
+          "dockerfile": "./Dockerfile"
+        }
+      }
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "DSH",
+        "class_name": "DshAgent"
+      }
+    ]
+  },
+  "exports": {
+    "DshAgent": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  },
+  "r2_buckets": [
+    {
+      "binding": "BACKUPS",
+      "bucket_name": "dsh-cf-backups"
+    }
+  ],
+  "browser": {
+    "binding": "BROWSER"
+  }
 }

@@ -4,6 +4,7 @@ import { DirectoryBackup } from '@cloudflare/sandbox';
 import { page } from './page.js';
 import { previewServer, previewHeaders } from './preview.js';
 import { observeChatStream } from './model-stream.js';
+import { checkWebsite } from './browser-check.js';
 export { DirectoryBackupGateway } from '@cloudflare/sandbox';
 const MINUTE = 60000;
 function diagnosticText(value) {
@@ -13,6 +14,10 @@ function diagnosticText(value) {
 export class Outbound extends WorkerEntrypoint {
   async fetch(request) {
     const u = new URL(request.url);
+    if(u.origin==='https://dsh-selfcheck.internal'&&u.pathname==='/check'&&request.method==='POST') {
+      const text=await request.text();if(text.length>2048)return new Response('Too large',{status:413});
+      try{return Response.json(await this.ctx.exports.BrowserCheck.check(JSON.parse(text)))}catch(e){return Response.json({error:String(e.message).slice(0,1200)},{status:503})}
+    }
     // This hostname is virtual: never forward container credentials or requests to OpenAI.
     if (u.protocol !== 'https:' || u.hostname !== 'api.openai.com' || u.pathname !== '/v1/chat/completions' || request.method !== 'POST') return new Response('Destination denied', { status: 403 });
     let stage = 'parse-request';
@@ -41,6 +46,26 @@ export class Outbound extends WorkerEntrypoint {
       try { await this.env.DSH.getByName('owner').recordGatewayError(failure); } catch { console.error('DSH_GATEWAY_DIAGNOSTIC_PERSIST_FAILED'); }
       return Response.json({ error: { message: failure.message, type: 'gateway_error', code: failure.code } }, { status: 502 });
     }
+  }
+}
+
+// No public route: invocation-local Fetcher scoped to one preview capability.
+export class BrowserSite extends WorkerEntrypoint {
+  async fetch(request) {
+    const u=new URL(request.url),p=this.ctx.props;
+    if(request.method!=='GET'||u.origin!=='http://dsh-site.test'||!p?.id||p.expiresAt<Date.now())return new Response('Denied',{status:403});
+    return this.env.DSH.getByName('owner').previewFile(p.id,u.pathname.slice(1));
+  }
+}
+export class BrowserCheck extends WorkerEntrypoint {
+  async check(body) {
+    if(!body||typeof body.root!=='string'||!body.root||body.root==='.')throw Error('请输入网站子目录');
+    const agent=this.env.DSH.getByName('owner');const token=await agent.acquireSiteCheck();
+    try{
+      const config=await agent.previewStart({root:body.root});
+      const site=this.ctx.exports.BrowserSite({props:{id:config.id,expiresAt:Date.now()+120000}});
+      return await checkWebsite(this.env.BROWSER,site);
+    }finally{await agent.releaseSiteCheck(token)}
   }
 }
 
@@ -243,6 +268,12 @@ export class DshAgent extends DurableObject {
   async recordGatewayError(failure) {
     await this.lifecycle.start();
     await this.ctx.storage.put('lastGatewayError', { at: Number(failure.at), stage: diagnosticText(failure.stage), model: diagnosticText(failure.model), gateway: diagnosticText(failure.gateway), message: diagnosticText(failure.message), code: failure.code == null ? null : diagnosticText(failure.code), status: Number.isInteger(failure.status) ? failure.status : null });
+  }
+  async acquireSiteCheck() {
+    return this.exclusive(async()=>{const now=Date.now(),lease=await this.ctx.storage.get('siteCheckLease');if(lease?.expiresAt>now)throw Error('网站自检正在执行，请勿并发调用');const token=crypto.randomUUID();await this.ctx.storage.put('siteCheckLease',{token,expiresAt:now+180000});return token});
+  }
+  async releaseSiteCheck(token) {
+    return this.exclusive(async()=>{const lease=await this.ctx.storage.get('siteCheckLease');if(lease?.token===token)await this.ctx.storage.delete('siteCheckLease')});
   }
   async decideApproval(body) {
     if(!body || typeof body.id!=='string' || !['allowed-once','rejected'].includes(body.outcome))throw Error('无效权限答复');

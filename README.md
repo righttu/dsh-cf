@@ -159,12 +159,14 @@ Worker 经 Access 验证后，以受控 exec 启动 Node 静态服务（8090）�
 本版本仅预览 HTML/CSS/普通 JS 和本地图片字体，使用相对资源路径；不安装依赖、不构建、不代理后端 API、不支持外部 CDN、ES 模块开发服务器或 Vite HMR，也不等于正式网站发布。浏览器实际显示/Access 子资源加载仍需真实登录验收。
 
 ## 网站、自检截图与单次权限审批
-保留原始版式和可见的快照/R2 面板；减少重复说明。咖啡馆示例要求 Agent 在完成网站后主动调用 /app/site-check.mjs，使用真实 Chromium/Playwright 检查、修复重测、保存报告和桌面/手机截图。提示词不再列出 CDN 等负面限制，实际 egress 和浏览器 CSP 仍然执行；没有放开互联网。
+保留原始版式和可见的快照/R2 面板；减少重复说明。咖啡馆示例要求 Agent 在完成网站后主动调用 /app/site-check.mjs，通过 Cloudflare Browser Run 使用真实托管 Chrome 检查、修复重测、保存报告和桌面/手机截图。提示词不再列出 CDN 等负面限制，实际 egress 和浏览器 CSP 仍然执行；没有放开互联网。
 截图及报告在当前 Agent 回复正文下自动呈现，不需要额外点自检。截图只证明捕获到的页面；实际断言结果、页面/资源错误与失败项单独显示。读取报告时拒绝早于本次任务的结果。静态链接仍要求 Access 登录，最长 1 小时，关闭不删除文件。
 权限：SDK approval/request 原样展示工具、会话、调用标识和原因，用户选择 allowed-once 或 rejected。SDK 不提供完整工具参数，原因并非可信完整命令；不确定时拒绝。申请 5 分钟过期取消，重启未完成审批取消，不自动恢复授权或重放任务，完成任务清理待决审批；记录保存在 /data/state.json。审批只允许工具这次操作，不改变容器 Outbound 策略；真实网络结果由工具报告，界面不模拟 403。用户批准的工具操作可能删除/修改文件，审批不是路径级安全隔离。
-Chromium 在容器内以 --no-sandbox 启动（外层容器仍为隔离边界），不用于浏览不可信公网。Playwright 在镜像构建期安装，运行时不下载浏览器或依赖。浏览器采用与网站预览相同的主要 CSP。测试脚本约定的 data-testid 见 /app/site-check.mjs。
-重要：Worker 发布不替换旧快照镜像。新审批 Bridge 与 Chromium 需要当前新版镜像：必须先成功保存所需数据，再显式从 R2 恢复来切换；不自动销毁旧环境、不假装旧快照已有这些功能。
+浏览器已切换为 Browser Run 的 BROWSER binding + 官方 CDP 接口；容器不再安装 Chromium/playwright-core。Agent 仍主动执行 /app/site-check.mjs，它只向受控虚拟地址 dsh-selfcheck.internal POST 网站子目录；Worker 用一次性受限 BrowserSite Fetcher 读取当前静态预览。Browser Run guardrails 只允许 dsh-site.test，HTTP 虚拟域名不走公网 DNS；浏览器不能访问控制台、任意 URL 或公共互联网。原有容器模型外联策略未放宽，不能用浏览器绕过它。BrowserSite 无公开路由，props 限定预览 ID 和 120 秒时限；浏览器关闭后不保留 Live View URL 或会话令牌。SDK 依赖为原生 BROWSER binding，无额外浏览器 npm 包。并发检查被 DO lease 拒绝，不自动重试检查；真实错误和截图经 helper 写入网站目录，报告照常显示在聊天回复下。CDP 检查包含真实 DOM 筛选、加入、重置、资源错误以及桌面/移动尺寸截图；不是全站完整验收。检查约定的 data-testid 见 /app/site-check.mjs。
+重要：Worker 发布不替换旧快照镜像。审批 Bridge 与新自检客户端需要当前新版镜像：必须先成功保存所需数据，再显式从 R2 恢复来切换；不自动销毁旧环境、不假装旧快照已有这些功能。
 
 ## 自定义域名
 主入口配置为 https://dsh.righttu.uk（Wrangler routes custom_domain）。保留 workers_dev:true 作为迁移期间备用入口。部署需要 righttu.uk 是同账户的有效 Cloudflare zone，且构建部署凭据具备创建 Custom Domain 所需权限；已有冲突 CNAME 不会在代码中擅自删除。域名记录和证书由 Custom Domains 管理，不需要手工把 CNAME 指向 workers.dev。
 继续使用 Worker 级 Access / All traffic 时，新 Custom Domain 也受同一策略保护；如果现有应用只按旧 hostname 保护，账户所有者需在 Access 为新域名配置相同的邮箱允许策略。应用仍强制检查 ctx.access，未认证请求拒绝，不添加 Bypass。域名实际解析、证书和登录需部署后验证。
+
+本次只迁移自检浏览器，不实现自动镜像升级，不修改 saveAndStop/recover/boot 的升级与数据选择语义。BROWSER binding 的实际可用性、私有 outboundByHost 路由及 CDP 流程需 Cloudflare 真实运行验收；单元测试不证明这些线上链路已通过。
