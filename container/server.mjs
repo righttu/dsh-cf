@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { ApprovalQueue } from './approvals.mjs';
 import { timeStage } from './timing.mjs';
 import { updateHistory, historyView } from './history.mjs';
 import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
@@ -8,7 +9,10 @@ await mkdir('/data/workspace', { recursive: true });
 let state = { sessionId: null, task: null, history: [] };
 try { state = JSON.parse(await readFile('/data/state.json', 'utf8')); }
 catch (e) { if (e.code !== 'ENOENT') throw e; }
-async function save() { updateHistory(state); await writeFile('/data/state.tmp', JSON.stringify(state)); await rename('/data/state.tmp', '/data/state.json'); }
+let saveChain = Promise.resolve();
+function save() { updateHistory(state); const text=JSON.stringify(state); const next=saveChain.then(async()=>{await writeFile('/data/state.tmp',text);await rename('/data/state.tmp','/data/state.json')});saveChain=next.catch(()=>{});return next; }
+state.approvals = (state.approvals || []).map(a => a.status === 'pending' ? {...a,status:'cancelled',finishedAt:Date.now()} : a);
+const approvals = new ApprovalQueue(state.approvals, save);
 if (state.task?.status === 'running') { state.task.status = 'interrupted'; state.task.error = 'Runtime restarted; task was not replayed. Inspect side effects before submitting again.'; await save(); }
 let harness, session, runtimeId, busy = false, activeRunClock = null;
 async function getSession(timing) {
@@ -17,9 +21,9 @@ async function getSession(timing) {
   if (session) { timing.runtimeId = runtimeId; return session; }
   runtimeId = crypto.randomUUID(); timing.runtimeId = runtimeId;
   harness = new DeepSeekHarness({ profile: 'sdk', dshHome: '/data/dsh-home', cwd: '/data/workspace', processCwd: '/data/workspace', patches: ['/app/gateway.cordis.yml'], provider: 'cloudflare-gateway', model: 'dsh-model', approvalRequests: true, env: { PATH: process.env.PATH, HOME: '/data', DSH_GATEWAY_PLACEHOLDER: 'cloudflare-binding-no-secret', DSH_TELEMETRY_DISABLED: '1', NODE_EXTRA_CA_CERTS: '/etc/cloudflare/certs/cloudflare-containers-ca.crt' }, onUserQuestion: async () => ({ cancelled: true }), shutdownTimeoutMs: 15000, disposeEofGraceMs: 15000 });
-  // Fail closed: do not grant tool/plugin approvals without an interactive approver.
+  // Each SDK approval waits for the authenticated console owner; never auto-grant.
   harness.client.start();
-  harness.client.onRequest(async () => ({ outcome: 'rejected' }));
+  harness.client.onRequest((method, params) => method === 'approval/request' ? approvals.request(params, state.task?.id) : Promise.reject(new Error('Unsupported host request')));
   try {
     await timeStage(timing, 'initialize', () => harness.start());
     session = state.sessionId ? await timeStage(timing, 'resume', () => harness.resumeSession(state.sessionId)) : harness.session('primary');
@@ -61,13 +65,17 @@ async function run(prompt) {
   }
   // Keep the initialized DSH runtime/session warm between tasks. /quiesce closes
   // it and drains persistence before any backup or filesystem snapshot.
-  finally { state.task.finishedAt = Date.now(); await save(); busy = false; }
+  finally { try { await approvals.cancelAll(); state.task.finishedAt = Date.now(); await save(); } finally { busy = false; } }
 }
 const reply = (res, code, value) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(value)); };
 http.createServer(async (req, res) => {
   try {
-    if (req.method === 'GET' && req.url === '/status') return reply(res, 200, { sessionId: state.sessionId, task: state.task, busy, historySupported: true, bridgeVersion: 'timing-v2', runtimeReady: !!session, runElapsedMs: busy && activeRunClock !== null ? performance.now() - activeRunClock : null });
+    if (req.method === 'GET' && req.url === '/status') return reply(res, 200, { sessionId: state.sessionId, task: state.task, busy, historySupported: true, bridgeVersion: 'approvals-browser-v1', approvals: approvals.view(), runtimeReady: !!session, runElapsedMs: busy && activeRunClock !== null ? performance.now() - activeRunClock : null });
     if (req.method === 'GET' && req.url === '/history') return reply(res, 200, historyView(state));
+    if (req.method === 'POST' && req.url === '/approvals/decide') {
+      let text='';for await (const chunk of req){text+=chunk;if(text.length>2048)return reply(res,413,{error:'Too large'})}
+      const body=JSON.parse(text);return reply(res,200,await approvals.decide(body.id,body.outcome));
+    }
     if (req.method === 'POST' && req.url === '/quiesce') {
       if (busy) return reply(res, 409, { error: 'Task is running' });
       await closeHarness(); await save(); return reply(res, 200, { ready: true });

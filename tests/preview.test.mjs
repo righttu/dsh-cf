@@ -64,11 +64,12 @@ test('preview panel uses a sandboxed iframe, not generated HTML in the console D
   assert.match(source, /api\('preview\/close'/);
 });
 
-test('demo UX exposes direct authenticated links and distinguishes self-check from browser validation', async () => {
+test('website automatically self-checks and presents evidence in the agent response', async () => {
  const source=await readFile(new URL('../src/page.js',import.meta.url),'utf8');
- assert.match(source,/id="demo-url"/);
- assert.match(source,/id="demo-check"/);
- assert.match(source,/new URL\(r.url,location.origin\)/);
- assert.match(source,/未自动执行浏览器渲染测试/);
- assert.match(source,/<details class="advanced card">/);
+ assert.match(source,/自行使用真实浏览器检查并截图/);
+ assert.match(source,/node \/app\/site-check.mjs coffee-site/);
+ assert.ok(source.indexOf('id="evidence-desktop"')>source.indexOf('id="output"'));
+ assert.doesNotMatch(source,/id="demo-check"|class="advanced card"/);
+ assert.match(source,/allowed-once/);
+ assert.match(source,/approvals\/decide/);
 });

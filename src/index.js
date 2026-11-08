@@ -244,6 +244,13 @@ export class DshAgent extends DurableObject {
     await this.lifecycle.start();
     await this.ctx.storage.put('lastGatewayError', { at: Number(failure.at), stage: diagnosticText(failure.stage), model: diagnosticText(failure.model), gateway: diagnosticText(failure.gateway), message: diagnosticText(failure.message), code: failure.code == null ? null : diagnosticText(failure.code), status: Number.isInteger(failure.status) ? failure.status : null });
   }
+  async decideApproval(body) {
+    if(!body || typeof body.id!=='string' || !['allowed-once','rejected'].includes(body.outcome))throw Error('无效权限答复');
+    return this.exclusive(async()=>{
+      if(!this.ctx.container.running)throw Error('环境已停止，权限申请失效');
+      const r=await this.bridge('/approvals/decide',body);const result=await r.json();if(!r.ok)throw Error(result.error||'权限答复失败');return result;
+    });
+  }
   async status() {
     await this.lifecycle.start();
     return this.exclusive(async () => {
@@ -382,7 +389,7 @@ export default {
     const identity = await ctx.access.getIdentity();
     if (!identity?.email) return new Response('Email identity required', { status: 403 });
     const u = new URL(request.url);
-    if (u.pathname === '/' && request.method === 'GET') return new Response(page, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer', 'content-security-policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-src 'self'; base-uri 'none'; frame-ancestors 'none'" } });
+    if (u.pathname === '/' && request.method === 'GET') return new Response(page, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer', 'content-security-policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self'; frame-src 'self'; base-uri 'none'; frame-ancestors 'none'" } });
     // Preview documents have an opaque sandbox origin; only their read-only route accepts Origin:null.
     const preview = /^\/preview\/([a-f0-9-]{36})\/(.*)$/.exec(u.pathname);
     if (preview && request.method === 'GET') {
@@ -404,6 +411,7 @@ export default {
       else if (u.pathname === '/api/preview/close' && request.method === 'POST') response = Response.json(await agent.previewClose());
       else if (u.pathname === '/api/wake' && request.method === 'POST') response = Response.json(await agent.wake());
       else if (u.pathname === '/api/history' && request.method === 'GET') response = Response.json(await agent.history());
+      else if (u.pathname === '/api/approvals/decide' && request.method === 'POST') {const text=await request.text();if(text.length>2048)return new Response('Too large',{status:413});response=Response.json(await agent.decideApproval(JSON.parse(text)));}
       else if (u.pathname === '/api/status' && request.method === 'GET') response = Response.json(await agent.status());
       else if (u.pathname === '/api/tasks' && request.method === 'POST') { if (Number(request.headers.get('content-length')) > 32768) return new Response('Too large', { status: 413 }); const text = await request.text(); if (text.length > 32768) return new Response('Too large', { status: 413 }); response = await agent.submit(JSON.parse(text)); }
       else if (u.pathname === '/api/checkpoint' && request.method === 'POST') response = Response.json(await agent.checkpoint());
