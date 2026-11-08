@@ -173,3 +173,8 @@ Worker 经 Access 验证后，以受控 exec 启动 Node 静态服务（8090）�
 
 ## 无最终回复与结束原因
 completed 不是仅看 SDK 是否抛异常：max-tokens/length 或没有最终公开回复都显示失败，不自动重试，不清空 DSH 会话或改动文件。Worker 对旧 Bridge 的状态和历史也执行该展示修正，因此不用为了获得新诊断而重建容器。新增 DSH_MODEL_REQUEST_META / DSH_MODEL_RESPONSE_META / DSH_MODEL_RESULT_META，仅记录预算字段、HTTP 状态、返回结构、finish_reason、公开回复字符数量、是否含推理/工具调用以及数字 token 用量；不记录对话、推理正文、工具参数或凭据。原始模型流仍逐字节透传，未调整模型、token 上限、路由或 reasoning 设置。max-tokens 是 DSH 报告的结束原因，并不单独证明真实预算耗尽；需对照上游 finish_reason/usage 和返回结构继续定位。
+
+## 独立 DSH 会话
+控制台新增“新建会话”和会话选择器，保持原有侧栏、预览、聊天证据、快照与 R2 布局。新会话使用随机 UUID，独立 DSH 模型上下文，但共享 /data/workspace 文件；不会删除旧对话或文件，不自动压缩或重放任务。旧 state.json 自动登记原会话，原有未标记的任务归入原会话；完整历史仍保存在同一 state.json，当前历史视图只展示所选会话。注册表与所有 DSH 会话目录随 /data 一起备份/恢复。
+创建/切换只在空闲时允许，通过同一 DO 排队和 Bridge busy 锁协调；提交携带预期 sessionId，跨页面切换后过期提交拒绝。切换关闭并刷盘旧 Harness，再选新上下文；已有会话必须 resumeSession，失败不另建替代。全新上下文用官方 getWorkingDirectory 物化并保存后才标为可恢复，尚不调用模型。首次任务作为会话标题；不支持删除会话。仅查看状态/历史不唤醒容器，显式创建/切换会唤醒。
+Bridge 标识 sessions-browser-run-v1。旧容器没有 /sessions 时，Worker 不假装新建成功；需先成功保存，再显式从 R2 恢复新版镜像。没有实现自动升级或销毁旧环境。新会话不继承旧聊天，但仍有 DSH 系统提示和工具定义，不能承诺空白会话只有用户输入的 token。

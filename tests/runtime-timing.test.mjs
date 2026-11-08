@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { timeStage } from '../container/timing.mjs';
+import { selectSession } from '../container/sessions.mjs';
 
 test('local stage timing uses a monotonic clock and preserves results', async () => {
   const values = [10, 17];
@@ -27,12 +28,12 @@ test('actual bridge session preparation initializes once then reports runtime re
       client = { start() {}, onRequest() {} };
       async start() { counts.initialize++; }
       async resumeSession() { counts.resume++; return {}; }
-      session() { return {}; }
+      session(id) { return { async getWorkingDirectory() { (counts.materialized ||= []).push(id); return '/data/workspace'; } }; }
       async close() {}
     }
   `);
-  for (const name of ['timing.mjs', 'history.mjs', 'approvals.mjs']) source = source.replace("'./" + name + "'", JSON.stringify(new URL('../container/' + name, import.meta.url).href));
-  source += '\nexport { getSession, closeHarness };\n';
+  for (const name of ['timing.mjs', 'history.mjs', 'approvals.mjs', 'sessions.mjs']) source = source.replace("'./" + name + "'", JSON.stringify(new URL('../container/' + name, import.meta.url).href));
+  source += '\nexport { getSession, closeHarness, state };\n';
   const module = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
   const first = {}, second = {};
   await module.getSession(first);
@@ -43,5 +44,12 @@ test('actual bridge session preparation initializes once then reports runtime re
   assert.equal(second.initializeMs, 0);
   assert.equal(second.resumeMs, 0);
   assert.deepEqual(module.counts, { initialize: 1, resume: 1 });
+  await module.closeHarness();
+  const id='11111111-1111-4111-8111-111111111111';
+  selectSession(module.state,{action:'create',id});
+  await module.getSession({});
+  assert.deepEqual(module.counts.materialized,[id]);assert.equal(module.counts.resume,1);
+  await module.closeHarness();await module.getSession({});
+  assert.equal(module.counts.resume,2);assert.deepEqual(module.counts.materialized,[id]);
   await module.closeHarness();
 });

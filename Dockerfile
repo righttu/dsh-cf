@@ -6,10 +6,11 @@ COPY container/package.json ./package.json
 RUN npm install --omit=dev && node -e "import('@deepseek-ai/dsh-sdk-client').then(m=>{if(!m.DeepSeekHarness)process.exit(1)})"
 COPY container/server.mjs ./server.mjs
 COPY container/approvals.mjs ./approvals.mjs
+COPY container/sessions.mjs ./sessions.mjs
 COPY container/site-check.mjs ./site-check.mjs
 COPY container/history.mjs ./history.mjs
 COPY container/timing.mjs ./timing.mjs
 COPY container/gateway.cordis.yml ./gateway.cordis.yml
-RUN node --check /app/server.mjs && node --check /app/approvals.mjs && node --check /app/site-check.mjs
+RUN node --check /app/server.mjs && node --check /app/sessions.mjs && node --check /app/approvals.mjs && node --check /app/site-check.mjs
 RUN mkdir -p /data/dsh-home /data/workspace
 CMD ["sleep", "infinity"]

@@ -148,6 +148,7 @@ export class DshAgent extends DurableObject {
       if (known) return Response.json(known);
       await this.ensure();
       const status = await (await this.bridge('/status')).json();
+      if(body.sessionId && body.sessionId!==status.sessionId)return Response.json({error:'当前会话已变化，请刷新后核对再提交'},{status:409});
       if (status.busy) return Response.json({ error: 'Another task is running' }, { status: 409 });
       // Record intent before crossing the process boundary. An ambiguous response must not replay work.
       const intent = { id: body.id, status: 'submission-unknown', startedAt: Date.now() };
@@ -290,6 +291,22 @@ export class DshAgent extends DurableObject {
       const r=await this.bridge('/approvals/decide',body);const result=await r.json();if(!r.ok)throw Error(result.error||'权限答复失败');return result;
     });
   }
+  async changeSession(body) {
+    if (!body || !['create','select'].includes(body.action) || typeof body.id !== 'string' || body.id.length>100) throw Error('无效会话操作');
+    await this.lifecycle.start();
+    return this.exclusive(async()=>{
+      await this.ensure();
+      const status=await (await this.bridge('/status')).json();
+      if(status.busy)throw Error('任务正在执行，请结束后再切换会话');
+      if(!status.sessionsSupported)throw Error('当前容器尚不支持独立会话。请先成功保存，再从 R2 恢复到新版镜像；未改动当前会话。');
+      const r=await this.bridge('/sessions',body), data=await r.json();
+      if(!r.ok)throw Error(data.error||'切换会话失败');
+      const latest=await (await this.bridge('/status')).json();
+      await this.ctx.storage.put({lastTask:latest.task||null,lastActivity:Date.now()});
+      await this.ctx.storage.delete(['responseTiming','lastGatewayError']);this.live=null;
+      return data;
+    });
+  }
   async status() {
     await this.lifecycle.start();
     return this.exclusive(async () => {
@@ -298,6 +315,7 @@ export class DshAgent extends DurableObject {
         info = await (await this.bridge('/status')).json();
         if (info.task) { info.task = normalizeTask(info.task); await this.rememberTask(info.task); }
       }
+      if(!this.ctx.container.running){const saved=await this.ctx.storage.get('checkpointHistory');info={...info,sessionId:saved?.sessionId||null,sessions:saved?.sessions||[],sessionsSupported:!!saved?.sessionsSupported};}
       info.task = normalizeTask(info.task);
       const cp = await this.ctx.storage.get('checkpoint');
       const latestBackup = await this.ctx.storage.get('latestBackup');
@@ -315,7 +333,7 @@ export class DshAgent extends DurableObject {
     if (!r.ok) throw new Error('无法读取容器中的任务历史');
     const data = await r.json();
     if (!Array.isArray(data.entries)) throw new Error('历史数据格式不正确');
-    return { available: true, entries: data.entries.map(normalizeTask), total: data.total, sessionId: data.sessionId || null, readAt: Date.now() };
+    return { available: true, sessions: data.sessions || [], sessionsSupported: !!data.sessionsSupported, entries: data.entries.map(normalizeTask), total: data.total, sessionId: data.sessionId || null, readAt: Date.now() };
   }
   async history() {
     return this.exclusive(async () => {
@@ -450,6 +468,7 @@ export default {
       }
       else if (u.pathname === '/api/preview/close' && request.method === 'POST') response = Response.json(await agent.previewClose());
       else if (u.pathname === '/api/wake' && request.method === 'POST') response = Response.json(await agent.wake());
+      else if (u.pathname === '/api/sessions' && request.method === 'POST') { const text=await request.text();if(text.length>2048)return new Response('Too large',{status:413});response=Response.json(await agent.changeSession(JSON.parse(text))); }
       else if (u.pathname === '/api/history' && request.method === 'GET') response = Response.json(await agent.history());
       else if (u.pathname === '/api/approvals/decide' && request.method === 'POST') {const text=await request.text();if(text.length>2048)return new Response('Too large',{status:413});response=Response.json(await agent.decideApproval(JSON.parse(text)));}
       else if (u.pathname === '/api/status' && request.method === 'GET') response = Response.json(await agent.status());

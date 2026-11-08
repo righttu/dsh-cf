@@ -49,7 +49,7 @@ function fixture({ running = false, busy = false, revision, backup } = {}) {
     storage: {
       async get(key) { return data.get(key); },
       async put(key, value) { if (typeof key === 'string') data.set(key, structuredClone(value)); else for (const [k, v] of Object.entries(key)) data.set(k, structuredClone(v)); },
-      async delete(key) { data.delete(key); }
+      async delete(key) { for(const k of Array.isArray(key)?key:[key]) data.delete(k); }
     }
   };
   const g = new DshAgent(ctx, {});
@@ -273,4 +273,22 @@ test('expired demo links are rejected without waking a container', async () => {
   data.set('previewConfig', {id:'expired',expiresAt:Date.now()-1});
   assert.equal((await g.previewFile('expired','index.html')).status,404);
   assert.equal(c.running,false);
+});
+
+test('busy tasks and unsupported legacy bridges cannot change sessions',async()=>{
+ const {g,c,info}=fixture({running:true,busy:true});const body={action:'create',id:'11111111-1111-4111-8111-111111111111'};
+ await assert.rejects(g.changeSession(body),/任务正在执行/);assert.equal(c.running,true);
+ info.busy=false;await assert.rejects(g.changeSession(body),/尚不支持/);assert.equal(c.running,true);
+});
+test('session change clears stale result/timing without destroying or replaying work',async()=>{
+ const {g,c,data,events}=fixture({running:true});let active='primary';
+ g.bridge=async(path,body)=>{if(path==='/sessions')active=body.id;return Response.json({sessionsSupported:true,sessionId:active,sessions:[],busy:false,task:null})};
+ data.set('lastTask',{id:'old'});data.set('responseTiming',{taskId:'old'});data.set('lastGatewayError',{message:'old'});
+ await g.changeSession({action:'create',id:'11111111-1111-4111-8111-111111111111'});
+ assert.equal(data.get('lastTask'),null);assert.equal(data.has('responseTiming'),false);assert.equal(data.has('lastGatewayError'),false);assert.equal(c.running,true);assert.equal(events.includes('destroy'),false);
+});
+test('a stale page cannot submit into a different active session',async()=>{
+ const {g,data,info}=fixture({running:true});info.sessionId='new-context';
+ const response=await g.submit({id:'11111111-1111-4111-8111-111111111111',prompt:'hello',sessionId:'old-context'});
+ assert.equal(response.status,409);assert.equal(data.has('request:11111111-1111-4111-8111-111111111111'),false);
 });

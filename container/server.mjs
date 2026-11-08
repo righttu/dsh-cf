@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { initSessions, sessionView, selectSession } from './sessions.mjs';
 import { ApprovalQueue } from './approvals.mjs';
 import { timeStage } from './timing.mjs';
 import { updateHistory, historyView, normalizeTask } from './history.mjs';
@@ -9,6 +10,7 @@ await mkdir('/data/workspace', { recursive: true });
 let state = { sessionId: null, task: null, history: [] };
 try { state = JSON.parse(await readFile('/data/state.json', 'utf8')); }
 catch (e) { if (e.code !== 'ENOENT') throw e; }
+initSessions(state);
 let saveChain = Promise.resolve();
 function save() { updateHistory(state); const text=JSON.stringify(state); const next=saveChain.then(async()=>{await writeFile('/data/state.tmp',text);await rename('/data/state.tmp','/data/state.json')});saveChain=next.catch(()=>{});return next; }
 state.approvals = (state.approvals || []).map(a => a.status === 'pending' ? {...a,status:'cancelled',finishedAt:Date.now()} : a);
@@ -26,7 +28,14 @@ async function getSession(timing) {
   harness.client.onRequest((method, params) => method === 'approval/request' ? approvals.request(params, state.task?.id) : Promise.reject(new Error('Unsupported host request')));
   try {
     await timeStage(timing, 'initialize', () => harness.start());
-    session = state.sessionId ? await timeStage(timing, 'resume', () => harness.resumeSession(state.sessionId)) : harness.session('primary');
+    const current = state.sessions.find(s => s.id === state.sessionId);
+    if (current.initialized) session = await timeStage(timing, 'resume', () => harness.resumeSession(current.id));
+    else {
+      session = harness.session(current.id);
+      // Materialize the named session durably before marking it resumable.
+      await session.getWorkingDirectory();
+      current.initialized = true; await save();
+    }
     return session;
   } catch (e) { await harness.close(); harness = undefined; session = undefined; throw e; }
 }
@@ -47,8 +56,8 @@ async function run(prompt) {
     const prepareStarted = performance.now();
     const s = await getSession(timing);
     timing.prepareMs = performance.now() - prepareStarted;
-    // The identity is fixed. Missing/incompatible stored sessions fail rather than reset history.
-    state.sessionId = state.sessionId || 'primary'; await timeStage(timing, 'stateSave', save);
+    // Existing sessions must resume exactly; new sessions have independent named contexts.
+    state.task.sessionId = state.sessionId; await timeStage(timing, 'stateSave', save);
     timing.beforeRunAt = Date.now(); activeRunClock = performance.now(); timing.phase = 'agent';
     console.log('DSH_PREPARE_TIMING', JSON.stringify({ taskId: state.task.id, ...timing }));
     const result = await s.run(prompt);
@@ -71,8 +80,18 @@ async function run(prompt) {
 const reply = (res, code, value) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(value)); };
 http.createServer(async (req, res) => {
   try {
-    if (req.method === 'GET' && req.url === '/status') return reply(res, 200, { sessionId: state.sessionId, task: state.task, busy, historySupported: true, bridgeVersion: 'approvals-browser-run-v1', approvals: approvals.view(), runtimeReady: !!session, runElapsedMs: busy && activeRunClock !== null ? performance.now() - activeRunClock : null });
+    if (req.method === 'GET' && req.url === '/status') return reply(res, 200, { sessionId: state.sessionId, task: state.task, busy, historySupported: true, bridgeVersion: 'sessions-browser-run-v1', ...sessionView(state), approvals: approvals.view(), runtimeReady: !!session, runElapsedMs: busy && activeRunClock !== null ? performance.now() - activeRunClock : null });
     if (req.method === 'GET' && req.url === '/history') return reply(res, 200, historyView(state));
+    if (req.method === 'POST' && req.url === '/sessions') {
+      let text=''; for await (const chunk of req) { text+=chunk; if(text.length>2048)return reply(res,413,{error:'Too large'}); }
+      const body=JSON.parse(text);
+      if(busy)return reply(res,409,{error:'任务或会话操作正在执行，请结束后再切换'});
+      busy=true;
+      const previous=structuredClone(state);
+      try { await closeHarness(); await approvals.cancelAll(); updateHistory(state); selectSession(state,body); await save(); return reply(res,200,sessionView(state)); }
+      catch(e) { previous.approvals=approvals.records; state=previous; throw e; }
+      finally {busy=false;}
+    }
     if (req.method === 'POST' && req.url === '/approvals/decide') {
       let text='';for await (const chunk of req){text+=chunk;if(text.length>2048)return reply(res,413,{error:'Too large'})}
       const body=JSON.parse(text);return reply(res,200,await approvals.decide(body.id,body.outcome));
@@ -87,8 +106,12 @@ http.createServer(async (req, res) => {
       const body = JSON.parse(text);
       if (typeof body.prompt !== 'string' || !body.prompt.trim() || typeof body.id !== 'string') return reply(res, 400, { error: 'Invalid task' });
       if (busy) return reply(res, 409, { error: 'Task is running' });
+      if(body.sessionId && body.sessionId!==state.sessionId)return reply(res,409,{error:'当前会话已变化，请刷新后重试'});
       if (state.task?.id === body.id) return reply(res, 200, state.task);
-      busy = true; state.task = { id: body.id, prompt: body.prompt, status: 'running', startedAt: Date.now() }; await save();
+      busy = true;
+      const current=state.sessions.find(s=>s.id===state.sessionId);
+      if(current.title==='新会话')current.title=body.prompt.trim().slice(0,50);
+      state.task = { sessionId: state.sessionId, id: body.id, prompt: body.prompt, status: 'running', startedAt: Date.now() }; await save();
       reply(res, 202, state.task); void run(body.prompt); return;
     }
     reply(res, 404, { error: 'Not found' });

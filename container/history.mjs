@@ -21,7 +21,8 @@ export function updateHistory(state) {
   else state.history[index] = entry;
 }
 export function historyView(state) {
-  const history = Array.isArray(state.history) ? state.history : [];
+  const allHistory = Array.isArray(state.history) ? state.history : [];
+  const history = state.sessions ? allHistory.filter(t=>t.sessionId===state.sessionId) : allHistory;
   const entries = [];
   let bytes = 0;
   for (const task of history.slice(-50).reverse()) {
@@ -35,5 +36,5 @@ export function historyView(state) {
     if (bytes + size > 88000) break;
     bytes += size; entries.unshift(entry);
   }
-  return { available: true, entries, total: history.length, sessionId: state.sessionId || null };
+  return { available: true, entries, total: history.length, sessionId: state.sessionId || null, ...(state.sessions ? { sessions: state.sessions.map(({id,title,createdAt})=>({id,title,createdAt})), sessionsSupported: true } : {}) };
 }
