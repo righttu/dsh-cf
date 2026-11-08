@@ -157,3 +157,7 @@ Worker 经 Access 验证后，以受控 exec 启动 Node 静态服务（8090）�
 安全隔离：iframe sandbox 只允许 scripts，不允许 same-origin/forms/popups/top-navigation；预览响应自身也有 CSP sandbox（新窗口同样生效）、connect-src none、frame-src none、form-action none、无缓存、nosniff。Origin:null 仅允许预览只读路由，管理 API 继续要求同源。不能把 allow-same-origin 加回去；需要完整模块/HMR/API 支持时，应先提供独立预览域名和独立认证策略。
 
 本版本仅预览 HTML/CSS/普通 JS 和本地图片字体，使用相对资源路径；不安装依赖、不构建、不代理后端 API、不支持外部 CDN、ES 模块开发服务器或 Vite HMR，也不等于正式网站发布。浏览器实际显示/Access 子资源加载仍需真实登录验收。
+
+## 临时演示体验
+主界面聚焦生成、临时链接、执行结果；环境/测速/快照恢复默认折叠，历史保留。静态演示仍经 Access 验证，完整 HTTPS 链接可在浏览器直接打开，不是匿名公开分享。每次打开重新生成 ID，有效 1 小时；旧链接、关闭和过期均拒绝访问，休眠不由旧链接自动唤醒。结束只撤销访问，不删除文件或强制停止正在执行的任务。
+发布前检查目录/入口边界与入口 HTTP 可用性；Agent 示例要求执行实际自检并报告命令、退出码、未验证项。Agent 自检不是可信浏览器自动化，不保证其生成的测试覆盖充分；未做真实浏览器验收不能声称视觉/DOM 交互已通过。现有 CSP 仍禁止模块网络、后端请求和表单提交。

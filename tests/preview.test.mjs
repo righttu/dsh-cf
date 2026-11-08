@@ -63,3 +63,12 @@ test('preview panel uses a sandboxed iframe, not generated HTML in the console D
   assert.match(source, /api\('preview\/open'/);
   assert.match(source, /api\('preview\/close'/);
 });
+
+test('demo UX exposes direct authenticated links and distinguishes self-check from browser validation', async () => {
+ const source=await readFile(new URL('../src/page.js',import.meta.url),'utf8');
+ assert.match(source,/id="demo-url"/);
+ assert.match(source,/id="demo-check"/);
+ assert.match(source,/new URL\(r.url,location.origin\)/);
+ assert.match(source,/未自动执行浏览器渲染测试/);
+ assert.match(source,/<details class="advanced card">/);
+});

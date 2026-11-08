@@ -157,15 +157,18 @@ export class DshAgent extends DurableObject {
       if (!ready) throw new Error('预览服务未启动；8090 端口可能已被占用。未停止或替换任何已有服务。');
       const r = await port.fetch('http://preview/_configure', { method: 'POST', headers: { ...options.headers, 'content-type': 'application/json' }, body: JSON.stringify({ root }) });
       if (!r.ok) throw new Error('目录不可预览：请确认目录存在、含 index.html，且文件位于 /data/workspace 内。');
-      const config = { id: crypto.randomUUID(), root: root || '.', at: Date.now() };
+      const probe = await port.fetch('http://preview/index.html', options);
+      if (!probe.ok) throw new Error('入口 HTTP 检查失败，演示未开放。');
+      const checks = [{ name: '目录与入口安全校验', passed: true }, { name: '入口 HTTP 200', passed: true }];
+      const config = { id: crypto.randomUUID(), root: root || '.', at: Date.now(), expiresAt: Date.now() + 60 * MINUTE }; 
       await this.ctx.storage.put({ previewConfig: config, lastActivity: Date.now() });
-      return { ...config, url: '/preview/' + config.id + '/index.html' };
+      return { ...config, checks, url: '/preview/' + config.id + '/index.html' };
     });
   }
   async previewFile(id, pathname) {
     return this.exclusive(async () => {
       const config = await this.ctx.storage.get('previewConfig');
-      if (!config || config.id !== id) return new Response('预览已关闭或已更新，请在工作台重新打开。', { status: 404 });
+      if (!config || config.id !== id || !config.expiresAt || Date.now() >= config.expiresAt) return new Response('预览已关闭或已更新，请在工作台重新打开。', { status: 404 });
       if (!this.ctx.container.running) return new Response('环境已休眠。请回工作台点击打开预览；不会为旧链接自动启动容器。', { status: 409 });
       const secret = await this.ctx.storage.get('previewSecret');
       // Only GET on the dedicated static server; never proxy the DSH bridge or caller headers.
@@ -254,7 +257,9 @@ export class DshAgent extends DurableObject {
       const hasBackup = !!latestBackup;
       const backupAt = await this.ctx.storage.get('latestBackupAt') ?? (latestBackup?.id && latestBackup.id === cp?.backup?.id ? cp.at : null);
       const lastActivity = await this.ctx.storage.get('lastActivity');
-      return { ...info, live: this.live?.taskId === info.task?.id ? this.live : null, lastBoot: await this.ctx.storage.get('lastBoot') ?? null, responseTiming: await this.ctx.storage.get('responseTiming') ?? null, hasBackup, backupAt, idleShutdownAt: this.ctx.container.running && !info.busy && lastActivity ? lastActivity + 10 * MINUTE : null, running: this.ctx.container.running, checkpointAt: cp?.at ?? null, checkpointError: await this.ctx.storage.get('checkpointError') ?? null, lastGatewayError: await this.ctx.storage.get('lastGatewayError') ?? null, modelConfig: { model: this.env.AI_MODEL || null, gateway: this.env.AI_GATEWAY_ID || 'default' } };
+      const preview = await this.ctx.storage.get('previewConfig');
+      const activePreview = this.ctx.container.running && preview?.expiresAt > Date.now() ? { ...preview, url: '/preview/' + preview.id + '/index.html' } : null;
+      return { ...info, preview: activePreview, live: this.live?.taskId === info.task?.id ? this.live : null, lastBoot: await this.ctx.storage.get('lastBoot') ?? null, responseTiming: await this.ctx.storage.get('responseTiming') ?? null, hasBackup, backupAt, idleShutdownAt: this.ctx.container.running && !info.busy && lastActivity ? lastActivity + 10 * MINUTE : null, running: this.ctx.container.running, checkpointAt: cp?.at ?? null, checkpointError: await this.ctx.storage.get('checkpointError') ?? null, lastGatewayError: await this.ctx.storage.get('lastGatewayError') ?? null, modelConfig: { model: this.env.AI_MODEL || null, gateway: this.env.AI_GATEWAY_ID || 'default' } };
     });
   }
   async readHistory() {

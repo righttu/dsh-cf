@@ -259,10 +259,17 @@ test('preview rejects absolute and hidden directories before starting the runtim
 
 test('old preview links never wake a sleeping container', async () => {
   const { g, c, data } = fixture();
-  data.set('previewConfig', { id:'active' });
+  data.set('previewConfig', { id:'active', expiresAt:Date.now()+60000 });
   assert.equal((await g.previewFile('old','index.html')).status,404);
   assert.equal((await g.previewFile('active','index.html')).status,409);
   assert.equal(c.running,false);
   await g.previewClose();
   assert.equal(data.has('previewConfig'),false);
+});
+
+test('expired demo links are rejected without waking a container', async () => {
+  const { g, c, data } = fixture();
+  data.set('previewConfig', {id:'expired',expiresAt:Date.now()-1});
+  assert.equal((await g.previewFile('expired','index.html')).status,404);
+  assert.equal(c.running,false);
 });
