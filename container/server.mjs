@@ -6,6 +6,10 @@ import { updateHistory, historyView, normalizeTask } from './history.mjs';
 import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
 import { DeepSeekHarness } from '@deepseek-ai/dsh-sdk-client';
 
+let runtimeVersion = null;
+try { runtimeVersion = JSON.parse(await readFile('/app/runtime-version.json','utf8')).version; }
+catch(e) { if(e.code !== 'ENOENT') throw e; }
+const runtimeIdentity = () => ({ runtimeVersion, ...(runtimeVersion === 'v2' ? { nodeVersion: process.version } : {}) });
 await mkdir('/data/workspace', { recursive: true });
 let state = { sessionId: null, task: null, history: [] };
 try { state = JSON.parse(await readFile('/data/state.json', 'utf8')); }
@@ -80,7 +84,7 @@ async function run(prompt) {
 const reply = (res, code, value) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(value)); };
 http.createServer(async (req, res) => {
   try {
-    if (req.method === 'GET' && req.url === '/status') return reply(res, 200, { sessionId: state.sessionId, task: state.task, busy, historySupported: true, bridgeVersion: 'sessions-browser-run-v1', ...sessionView(state), approvals: approvals.view(), runtimeReady: !!session, runElapsedMs: busy && activeRunClock !== null ? performance.now() - activeRunClock : null });
+    if (req.method === 'GET' && req.url === '/status') return reply(res, 200, { ...runtimeIdentity(), sessionId: state.sessionId, task: state.task, busy, historySupported: true, bridgeVersion: 'sessions-browser-run-v1', ...sessionView(state), approvals: approvals.view(), runtimeReady: !!session, runElapsedMs: busy && activeRunClock !== null ? performance.now() - activeRunClock : null });
     if (req.method === 'GET' && req.url === '/history') return reply(res, 200, historyView(state));
     if (req.method === 'POST' && req.url === '/sessions') {
       let text=''; for await (const chunk of req) { text+=chunk; if(text.length>2048)return reply(res,413,{error:'Too large'}); }

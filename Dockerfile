@@ -12,5 +12,7 @@ COPY container/history.mjs ./history.mjs
 COPY container/timing.mjs ./timing.mjs
 COPY container/gateway.cordis.yml ./gateway.cordis.yml
 RUN node --check /app/server.mjs && node --check /app/sessions.mjs && node --check /app/approvals.mjs && node --check /app/site-check.mjs
+ARG DSH_APP_VERSION=v1
+RUN node -e "require('fs').writeFileSync('/app/runtime-version.json', JSON.stringify({version:process.argv[1]}))" "$DSH_APP_VERSION"
 RUN mkdir -p /data/dsh-home /data/workspace
 CMD ["sleep", "infinity"]

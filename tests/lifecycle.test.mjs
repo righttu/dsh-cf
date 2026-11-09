@@ -292,3 +292,46 @@ test('a stale page cannot submit into a different active session',async()=>{
  const response=await g.submit({id:'11111111-1111-4111-8111-111111111111',prompt:'hello',sessionId:'old-context'});
  assert.equal(response.status,409);assert.equal(data.has('request:11111111-1111-4111-8111-111111111111'),false);
 });
+
+function versionFixture(options={}) {
+ const f=fixture({running:true,revision:2,...options});
+ f.c.images.v2='v2-image';f.info.runtimeVersion='v1';f.info.sessions=[];
+ const start=f.c.start.bind(f.c);f.c.start=o=>{start(o);f.info.runtimeVersion=o.image==='v2-image'?'v2':'v1';f.info.nodeVersion=f.info.runtimeVersion==='v2'?'v24.0.0':undefined;};
+ return f;
+}
+test('version switching rejects busy tasks before saving or destroying',async()=>{
+ const f=versionFixture({busy:true});await assert.rejects(f.g.changeVersion({version:'v2',confirm:true}),/任务/);assert.equal(f.c.running,true);assert.ok(!f.events.includes('destroy'));assert.ok(!f.events.includes('backup'));
+});
+test('versions use fresh backup and support repeated upgrade/downgrade',async()=>{
+ const f=versionFixture();
+ for(const version of ['v2','v1','v2']) {
+  f.events.length=0;const r=await f.g.changeVersion({version,confirm:true});assert.equal(r.version,version);
+  assert.ok(f.events.indexOf('backup')<f.events.indexOf('destroy'));assert.ok(f.events.indexOf('restore')>f.events.indexOf('destroy'));
+  assert.equal(f.data.get('checkpoint').runtimeVersion,version);assert.equal(f.data.get('versionOperation'),null);assert.equal(f.c.running,true);
+ }
+});
+test('failed restore preserves source checkpoint, blocks work, and supports explicit safety recovery',async()=>{
+ const f=versionFixture();f.c.failRestore=true;
+ await assert.rejects(f.g.changeVersion({version:'v2',confirm:true}),/未完成/);
+ assert.equal(f.data.get('checkpoint').runtimeVersion,'v1');assert.ok(f.data.get('versionOperation'));assert.equal(f.c.running,false);
+ await assert.rejects(f.g.ensure(),/尚未完成/);await assert.rejects(f.g.checkpoint(),/尚未完成/);
+ f.c.failRestore=false;await f.g.restoreVersionSafety();assert.equal(f.c.running,true);assert.equal(f.data.get('versionOperation'),null);
+});
+test('same version is a no-op and unconfirmed/unknown target is rejected',async()=>{
+ const f=versionFixture();assert.equal((await f.g.changeVersion({version:'v1',confirm:true})).changed,false);assert.ok(!f.events.includes('destroy'));
+ await assert.rejects(f.g.changeVersion({version:'v3',confirm:true}));await assert.rejects(f.g.changeVersion({version:'v2'}));
+});
+test('sleeping version display is sourced from checkpoint, not latest available image',async()=>{
+ const f=fixture();f.c.images.v2='v2-image';f.data.set('checkpoint',{runtimeVersion:'v1'});const v=await f.g.versions();assert.equal(v.current,'v1');assert.equal(v.latest,'v2');assert.equal(v.source,'checkpoint');
+});
+
+test('browser check lease blocks a version change without stopping the live container',async()=>{
+ const f=versionFixture();f.data.set('siteCheckLease',{token:'live',expiresAt:Date.now()+60000});await assert.rejects(f.g.changeVersion({version:'v2',confirm:true}),/浏览器/);assert.equal(f.c.running,true);assert.ok(!f.events.includes('backup'));
+});
+test('backup failure never stops the original container',async()=>{
+ const f=versionFixture();f.g.backups.backup=async()=>{throw Error('R2 unavailable')};await assert.rejects(f.g.changeVersion({version:'v2',confirm:true}),/R2 unavailable/);assert.equal(f.c.running,true);assert.ok(!f.events.includes('destroy'));assert.equal(f.info.runtimeVersion,'v1');
+});
+test('a mismatched target version is not committed as success',async()=>{
+ const f=versionFixture();const start=f.c.start.bind(f.c);f.c.start=o=>{start(o);f.info.runtimeVersion='v1'};
+ await assert.rejects(f.g.changeVersion({version:'v2',confirm:true}),/核验失败/);assert.equal(f.data.get('checkpoint').runtimeVersion,'v1');assert.ok(f.data.get('versionOperation'));assert.equal(f.c.running,false);
+});

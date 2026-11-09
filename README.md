@@ -181,3 +181,15 @@ Bridge 标识 sessions-browser-run-v1。旧容器没有 /sessions 时，Worker �
 
 ## Browser Run 失败定位
 浏览器先 acquire/launch 获取页面 targets，再 connectSession(sessionId,{targetId}) 显式连接 page target，必要时 devtools.newTarget。CDP 错误包含命令名称，报告记录 failedStage/failureKind。入口未加载时不继续跑 DOM 测试或拍空白截图。启动/连接/协议失败返回 retryable:false 与停止本轮自检的建议；新的网站提示词要求平台失败时不要通过 Bash 提权反复重试。此规则不是自动批准、取消或禁用工具权限；用户仍决定审批。DO lastBrowserCheck 和 Worker DSH_BROWSER_CHECK 保存精简失败诊断，不保存图片、Live View URL 或会话令牌。HTTP 200 仅指报告成功送达，不代表检查通过；passed 才是检查结果。未修改容器 egress 或 Browser Run allowlist。显式页面连接是兼容性修正，不能在真实 Browser Run 截图验收前宣称线上问题已解决。
+
+## 双版本演示（需本次构建部署成功）
+
+同一次部署提供两个命名镜像：dsh（V1）、v2（V2），用构建参数写入 /app/runtime-version.json。V2 唯一功能差异是 /status 返回实际 process.version。版本文件不在 /data 内，R2 恢复不会覆盖它。保留已有镜像依赖版本和数据格式；不是任意版本降级兼容机制。
+
+运行环境卡提供升级入口和版本选择；V1 提示 V2 可用，切回 V1 后可重复升级。旧运行容器不被部署强制替换，无法确认的旧版本显示未标记。首次演示可手动选择 V1 建立起点。停止状态展示的是已保存版本，不冒充运行中版本。
+
+切换时拒绝活跃任务、待审批和 Browser Run 检查；成功 quiesce、R2 备份、安全快照后才停止旧容器，固定此次备份并恢复到目标镜像；核验版本、V2 功能和会话目录后提交新版快照。保护的是 /data 内成功落盘的数据，不保存内存、进程或其他目录。额外后台作业尚无通用追踪，确认框明确要求用户先处理。
+
+持久化 versionOperation 阻止中断后继续工作或自动重试，失败后只能由用户明确点击恢复切换前环境；这使用保存时的安全快照，不是自动回滚。新检查点与清除操作标记、恢复优先级使用同一 storage.put 提交。正常 R2 恢复使用已选择的运行版本；历史任务不重放。
+
+本轮未改实例规格，仍是 standard-1；未实现自动升级或任意历史版本管理。单元测试不等于真实云端切换验收。

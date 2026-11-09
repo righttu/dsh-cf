@@ -106,7 +106,9 @@ export class DshAgent extends DurableObject {
   async bridge(path, body) {
     return this.ctx.container.getTcpPort(8080).fetch('http://container' + path, { method: body === undefined ? 'GET' : 'POST', ...(body === undefined ? {} : { body: JSON.stringify(body), headers: { 'content-type': 'application/json' } }) });
   }
+  async assertVersionIdle() { if (await this.ctx.storage.get('versionOperation')) throw Error('版本切换尚未完成，请先恢复切换前环境；不会自动重试或重放任务。'); }
   async ensure() {
+    await this.assertVersionIdle();
     if (!this.setup || !this.ctx.container.running) this.setup = this.boot().catch(e => { this.setup = undefined; throw e; });
     await this.setup;
   }
@@ -123,7 +125,7 @@ export class DshAgent extends DurableObject {
       if (recovering && !checkpoint) throw new Error('No saved checkpoint exists. Recovery requires inspection; refusing to start empty.');
       // Snapshot failure is explicit. Use the authenticated R2 recovery endpoint if expired.
       bootMeasurement = { kind: checkpoint?.snapshot ? 'snapshot' : 'image', snapshotId: checkpoint?.snapshot?.id || null, startedAt: Date.now() };
-      c.start({ ...(checkpoint?.snapshot ? { containerSnapshot: checkpoint.snapshot } : { image: c.images.dsh }), instance: 'standard-1', entrypoint: ['sleep', 'infinity'], enableInternet: false });
+      c.start({ ...(checkpoint?.snapshot ? { containerSnapshot: checkpoint.snapshot } : { image: c.images[(await this.ctx.storage.get('selectedVersion')) === 'v2' ? 'v2' : 'dsh'] }), instance: 'standard-1', entrypoint: ['sleep', 'infinity'], enableInternet: false });
     }
     await c.setInactivityTimeout(5 * MINUTE);
     // Specific backup target MUST precede the port-80 catch-all.
@@ -332,7 +334,7 @@ export class DshAgent extends DurableObject {
       const lastActivity = await this.ctx.storage.get('lastActivity');
       const preview = await this.ctx.storage.get('previewConfig');
       const activePreview = this.ctx.container.running && preview?.expiresAt > Date.now() ? { ...preview, url: '/preview/' + preview.id + '/index.html' } : null;
-      return { ...info, lastBrowserCheck: await this.ctx.storage.get('lastBrowserCheck') ?? null, preview: activePreview, live: this.live?.taskId === info.task?.id ? this.live : null, lastBoot: await this.ctx.storage.get('lastBoot') ?? null, responseTiming: await this.ctx.storage.get('responseTiming') ?? null, hasBackup, backupAt, idleShutdownAt: this.ctx.container.running && !info.busy && lastActivity ? lastActivity + 10 * MINUTE : null, running: this.ctx.container.running, checkpointAt: cp?.at ?? null, checkpointError: await this.ctx.storage.get('checkpointError') ?? null, lastGatewayError: await this.ctx.storage.get('lastGatewayError') ?? null, modelConfig: { model: this.env.AI_MODEL || null, gateway: this.env.AI_GATEWAY_ID || 'default' } };
+      return { ...info, versions: await this.versions(info), lastBrowserCheck: await this.ctx.storage.get('lastBrowserCheck') ?? null, preview: activePreview, live: this.live?.taskId === info.task?.id ? this.live : null, lastBoot: await this.ctx.storage.get('lastBoot') ?? null, responseTiming: await this.ctx.storage.get('responseTiming') ?? null, hasBackup, backupAt, idleShutdownAt: this.ctx.container.running && !info.busy && lastActivity ? lastActivity + 10 * MINUTE : null, running: this.ctx.container.running, checkpointAt: cp?.at ?? null, checkpointError: await this.ctx.storage.get('checkpointError') ?? null, lastGatewayError: await this.ctx.storage.get('lastGatewayError') ?? null, modelConfig: { model: this.env.AI_MODEL || null, gateway: this.env.AI_GATEWAY_ID || 'default' } };
     });
   }
   async readHistory() {
@@ -359,6 +361,7 @@ export class DshAgent extends DurableObject {
     });
   }
   async saveAndStop() {
+    await this.assertVersionIdle();
     const c = this.ctx.container;
     if (!c.running) return { saved: false, reason: 'already stopped' };
     const r = await this.bridge('/quiesce', {});
@@ -379,7 +382,7 @@ export class DshAgent extends DurableObject {
     const backup = await this.backups.backup({ dir: '/data' });
     await this.ctx.storage.put({ latestBackup: backup, latestBackupAt: Date.now() });
     const snapshot = await c.snapshotContainer({ name: 'dsh-idle' });
-    await this.ctx.storage.put('checkpoint', { snapshot, backup, image: c.images.dsh, at: Date.now() });
+    await this.ctx.storage.put('checkpoint', { snapshot, backup, image: info.runtimeVersion === 'v2' ? c.images.v2 : c.images.dsh, runtimeVersion: info.runtimeVersion || null, nodeVersion: info.nodeVersion || null, at: Date.now() });
     await this.ctx.storage.put('checkpointHistory', history);
     await this.ctx.storage.delete('checkpointError');
     await this.ctx.storage.delete('routingRecovery');
@@ -389,6 +392,7 @@ export class DshAgent extends DurableObject {
   async recover() {
     await this.lifecycle.start();
     return this.exclusive(async () => {
+      await this.assertVersionIdle();
       const backup = await this.ctx.storage.get('latestBackup');
       if (!backup) throw new Error('No R2 backup exists');
       const c = this.ctx.container;
@@ -403,7 +407,7 @@ export class DshAgent extends DurableObject {
         await this.ctx.storage.put('routingRecovery', { snapshot, image: c.images.dsh, at: Date.now() });
         await c.destroy(); this.setup = undefined;
       }
-      c.start({ image: c.images.dsh, instance: 'standard-1', entrypoint: ['sleep', 'infinity'], enableInternet: false });
+      c.start({ image: c.images[(await this.ctx.storage.get('selectedVersion')) === 'v2' ? 'v2' : 'dsh'], instance: 'standard-1', entrypoint: ['sleep', 'infinity'], enableInternet: false });
       await c.setInactivityTimeout(5 * MINUTE);
       try {
         await this.backups.intercept();
@@ -419,7 +423,7 @@ export class DshAgent extends DurableObject {
         const quiet = await this.bridge('/quiesce', {});
         if (!quiet.ok) throw new Error('恢复后的环境无法安全保存');
         const snapshot = await c.snapshotContainer({ name: 'r2-recovery' });
-        await this.ctx.storage.put('checkpoint', { snapshot, backup, image: c.images.dsh, at: Date.now() });
+        await this.ctx.storage.put('checkpoint', { snapshot, backup, image: restoredInfo.runtimeVersion === 'v2' ? c.images.v2 : c.images.dsh, runtimeVersion: restoredInfo.runtimeVersion || null, nodeVersion: restoredInfo.nodeVersion || null, at: Date.now() });
         await this.ctx.storage.delete('routingRecovery');
         await this.ctx.storage.delete('checkpointError');
         await this.ctx.storage.put('checkpointHistory', { ...history, restoredAt: Date.now() });
@@ -431,9 +435,91 @@ export class DshAgent extends DurableObject {
       return { recovered: true, note: 'Next task starts DSH and validates session compatibility. No task was replayed.' };
     });
   }
+  async versions(liveInfo) {
+    const cp = await this.ctx.storage.get('checkpoint');
+    const op = await this.ctx.storage.get('versionOperation');
+    const current = this.ctx.container.running ? liveInfo?.runtimeVersion || null : cp?.runtimeVersion || null;
+    return { current, nodeVersion: this.ctx.container.running ? liveInfo?.nodeVersion || null : cp?.nodeVersion || null,
+      source: this.ctx.container.running ? 'container' : 'checkpoint', latest: 'v2',
+      available: ['v1','v2'].filter(v => this.ctx.container.images[v === 'v1' ? 'dsh' : 'v2']), operation: op || null };
+  }
+  async versionProgress() { return { operation: await this.ctx.storage.get('versionOperation') || null }; }
+  async restoreVersionSafety() {
+    return this.exclusive(async () => {
+      const op = await this.ctx.storage.get('versionOperation');
+      if (!op) return { restored: false };
+      // No automatic replay after a restart/ambiguous response. Explicit user action only.
+      const cp = await this.ctx.storage.get('checkpoint');
+      if (!cp?.snapshot) throw Error('没有可用的切换前快照，请保留现场并检查；不会启动空环境。');
+      if (this.ctx.container.running) await this.ctx.container.destroy();
+      this.setup = undefined;
+      await this.ctx.storage.put('routingRecovery', null);
+      try {
+        this.setup = this.boot().catch(e=>{this.setup=undefined;throw e});
+        await this.setup;
+        await this.ctx.storage.put('versionOperation',null);
+        return { restored: true };
+      } catch(e) {
+        await this.ctx.storage.put('versionOperation',{...op,error:diagnosticText(e.message)});
+        throw e;
+      }
+    });
+  }
+  async changeVersion(body) {
+    if (!body || !['v1','v2'].includes(body.version) || body.confirm !== true) throw Error('请选择版本并确认保存切换。');
+    await this.lifecycle.start();
+    return this.exclusive(async () => {
+      await this.assertVersionIdle();
+      const c = this.ctx.container, image = c.images[body.version === 'v1' ? 'dsh' : 'v2'];
+      if (!image) throw Error('目标镜像尚未配置。');
+      const lease = await this.ctx.storage.get('siteCheckLease');
+      if (lease?.expiresAt > Date.now()) throw Error('浏览器检查正在执行，请结束后再切换。');
+      await this.ensure();
+      const before = await (await this.bridge('/status')).json();
+      if (before.busy || before.approvals?.some(a => a.status === 'pending')) throw Error('任务或审批正在执行，请结束后再切换。');
+      if (before.runtimeVersion === body.version) return { changed: false };
+      // saveAndStop refuses busy state again and commits fresh backup + safety checkpoint BEFORE destroy.
+      await this.saveAndStop();
+      const source = await this.ctx.storage.get('checkpoint');
+      const op = { id: crypto.randomUUID(), target: body.version, stage: 'saved', startedAt: Date.now() };
+      await this.ctx.storage.put('versionOperation', op);
+      let started = false;
+      const stage = async value => { op.stage = value; await this.ctx.storage.put('versionOperation', op); };
+      try {
+        await stage('starting');
+        c.start({image, instance: 'standard-1', entrypoint: ['sleep','infinity'], enableInternet: false}); started = true;
+        await c.setInactivityTimeout(5 * MINUTE);
+        await this.backups.intercept();
+        await stage('restoring'); await this.backups.restore(source.backup);
+        await c.interceptAllOutboundHttp(this.ctx.exports.Outbound);
+        await c.interceptOutboundHttps('*',this.ctx.exports.Outbound);
+        await c.exec(['sh','-c','exec node /app/server.mjs >>/data/bridge.log 2>&1'],{stdout:'ignore',stderr:'ignore'});
+        await stage('validating');
+        let info;
+        for(let i=0;i<40;i++) { try { const r=await this.bridge('/status');if(r.ok){info=await r.json();break;} }catch{} await new Promise(r=>setTimeout(r,250)); }
+        if(info?.runtimeVersion !== body.version || (body.version === 'v2' && !/^v[0-9]+\./.test(info.nodeVersion || ''))) throw Error('目标容器版本或功能核验失败。');
+        const history = await this.readHistory();
+        if(JSON.stringify(history.sessions || []) !== JSON.stringify((await this.ctx.storage.get('checkpointHistory'))?.sessions || [])) throw Error('恢复后的会话目录不一致。');
+        const quiet = await this.bridge('/quiesce',{}); if(!quiet.ok) throw Error('恢复后的环境无法安全保存。');
+        const snapshot = await c.snapshotContainer({name:'version-'+body.version});
+        await this.ctx.storage.delete('previewConfig');
+        await this.lifecycle.jobs.push({id:'inspect',fn:'inspect',time:Date.now()+MINUTE});
+        // One atomic storage put commits the new checkpoint and clears the safety priority/operation.
+        await this.ctx.storage.put({checkpoint:{snapshot,backup:source.backup,image,runtimeVersion:info.runtimeVersion,nodeVersion:info.nodeVersion || null,at:Date.now()},
+          checkpointHistory:history,selectedVersion:body.version,versionOperation:null,routingRecovery:null,checkpointError:null,lastTask:info.task || null,lastActivity:Date.now(),responseTiming:null});
+        this.live = null; this.setup = Promise.resolve();
+        return {changed:true,version:info.runtimeVersion};
+      } catch(e) {
+        if(started) { await c.destroy(); this.setup=undefined; }
+        await this.ctx.storage.put('versionOperation',{...op,error:diagnosticText(e.message)});
+        throw Error('版本切换未完成：'+diagnosticText(e.message)+'。请点击恢复切换前环境；不会自动重试。');
+      }
+    });
+  }
   async onJob({ job }) {
     if (job.fn !== 'inspect') return;
     return this.exclusive(async () => {
+      if (await this.ctx.storage.get('versionOperation')) return;
       const c = this.ctx.container;
       if (!c.running) return;
       await c.setInactivityTimeout(5 * MINUTE);
@@ -475,6 +561,9 @@ export default {
         response = Response.json(await agent.previewStart(JSON.parse(text)));
       }
       else if (u.pathname === '/api/preview/close' && request.method === 'POST') response = Response.json(await agent.previewClose());
+      else if (u.pathname === '/api/versions/progress' && request.method === 'GET') response = Response.json(await agent.versionProgress());
+      else if (u.pathname === '/api/versions/restore' && request.method === 'POST') response = Response.json(await agent.restoreVersionSafety());
+      else if (u.pathname === '/api/versions' && request.method === 'POST') { const text=await request.text();if(text.length>2048)return new Response('Too large',{status:413});response=Response.json(await agent.changeVersion(JSON.parse(text))); }
       else if (u.pathname === '/api/wake' && request.method === 'POST') response = Response.json(await agent.wake());
       else if (u.pathname === '/api/sessions' && request.method === 'POST') { const text=await request.text();if(text.length>2048)return new Response('Too large',{status:413});response=Response.json(await agent.changeSession(JSON.parse(text))); }
       else if (u.pathname === '/api/history' && request.method === 'GET') response = Response.json(await agent.history());

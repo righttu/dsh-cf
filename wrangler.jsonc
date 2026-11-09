@@ -32,6 +32,12 @@
       "images": {
         "dsh": {
           "dockerfile": "./Dockerfile"
+        },
+        "v2": {
+          "dockerfile": "./Dockerfile",
+          "build_vars": {
+            "DSH_APP_VERSION": "v2"
+          }
         }
       }
     }
