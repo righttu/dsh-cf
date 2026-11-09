@@ -27,15 +27,15 @@ function uiFunctions(){
  const instance=script.slice(script.indexOf('const instancePresets='),script.indexOf('let instanceTarget='));
  new Script(buttons+'\n'+instance).runInNewContext(context);return{context,el};
 }
-test('upgrade remains visible and disabled while stopped, busy, latest, disconnected or blocked',()=>{
+test('upgrade is available while stopped but disabled when busy, latest, disconnected or blocked',()=>{
  const {context:c,el}=uiFunctions();
  const base={running:true,busy:false,versions:{current:'v1',available:['v1','v2'],operation:null}};
- for(const patch of [{running:false},{busy:true},{versions:{...base.versions,current:'v2'}},{versions:{...base.versions,available:['v1']}},{versions:{...base.versions,operation:{stage:'restoring'}}},{approvals:[{status:'pending'}]}]){
+ for(const patch of [{busy:true},{versions:{...base.versions,current:'v2'}},{versions:{...base.versions,available:['v1']}},{versions:{...base.versions,operation:{stage:'restoring'}}},{approvals:[{status:'pending'}]}]){
   c.state={...base,...patch};c.buttons();assert.equal(el('upgrade-version').disabled,true);assert.equal(el('upgrade-version').hidden,false);
  }
  c.state=base;c.connected=false;c.buttons();assert.equal(el('upgrade-version').disabled,true);
  c.connected=true;c.pending='version';c.buttons();assert.equal(el('upgrade-version').disabled,true);
- c.pending='';c.buttons();assert.equal(el('upgrade-version').disabled,false);assert.match(page,/#upgrade-version:disabled/);assert.match(page,/#upgrade-version:not\(:disabled\)/);
+ c.pending='';c.buttons();assert.equal(el('upgrade-version').disabled,false);c.state={...base,running:false};c.buttons();assert.equal(el('upgrade-version').disabled,false);assert.equal(el('instance-choose').disabled,true);assert.match(page,/将先自动唤醒已保存环境/);assert.match(page,/#upgrade-version:disabled/);assert.match(page,/#upgrade-version:not\(:disabled\)/);
 });
 test('configuration renders preset and custom CPU memory disk after a switch',()=>{
  const {context:c,el}=uiFunctions();c.renderInstance({current:'standard-1',source:'checkpoint'});

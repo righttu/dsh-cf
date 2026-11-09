@@ -534,7 +534,7 @@ export class DshAgent extends DurableObject {
     return this.exclusive(async () => {
       await this.assertVersionIdle();
       const c = this.ctx.container;
-      if (!c.running) throw Error('环境已停止，请先唤醒后再切换版本或规格。');
+      if (resize && !c.running) throw Error('环境已停止，请先唤醒后再切换规格。');
       const lease = await this.ctx.storage.get('siteCheckLease');
       if (lease?.expiresAt > Date.now()) throw Error('浏览器检查正在执行，请结束后再切换。');
       await this.ensure();

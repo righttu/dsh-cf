@@ -381,11 +381,21 @@ test('resize backs up before stopping, preserves version, and commits selected s
 test('resize rejects busy tasks without stopping',async()=>{
  const f=versionFixture({busy:true});await assert.rejects(f.g.changeInstance({instance:'standard-2',confirm:true}),/任务/);assert.ok(!f.events.includes('destroy'));
 });
-test('stopped environment cannot silently wake to switch version or size',async()=>{
- const f=versionFixture({running:false});
- await assert.rejects(f.g.changeVersion({version:'v2',confirm:true}),/环境已停止/);
- await assert.rejects(f.g.changeInstance({instance:'standard-2',confirm:true}),/环境已停止/);
- assert.ok(!f.events.includes('backup'));assert.ok(!f.events.some(x=>Array.isArray(x)&&x[0]==='start'));
+test('confirmed upgrade while stopped wakes saved snapshot then migrates through R2',async()=>{
+ const f=versionFixture();await f.g.createSnapshot();const cp=f.data.get('checkpoint');await f.c.destroy();f.events.length=0;
+ const result=await f.g.changeVersion({version:'v2',confirm:true});
+ const starts=f.events.filter(x=>Array.isArray(x)&&x[0]==='start').map(x=>x[1]);
+ assert.equal(starts[0].containerSnapshot.id,cp.snapshot.id);assert.equal(starts[0].image,undefined);assert.equal(starts[1].image,'v2-image');
+ assert.ok(f.events.indexOf('backup')<f.events.indexOf('destroy'));assert.ok(f.events.indexOf('restore')>f.events.indexOf('destroy'));
+ assert.equal(result.version,'v2');assert.equal(f.info.runtimeVersion,'v2');assert.equal(f.c.running,true);assert.equal(f.data.get('checkpoint').runtimeVersion,'v2');
+});
+test('stopped size selection still requires explicit wake',async()=>{
+ const f=versionFixture({running:false});await assert.rejects(f.g.changeInstance({instance:'standard-2',confirm:true}),/环境已停止/);
+ assert.ok(!f.events.some(x=>Array.isArray(x)&&x[0]==='start'));
+});
+test('stopped upgrade cannot bypass missing saved state protection',async()=>{
+ const f=versionFixture({running:false});f.data.set('everStarted',true);
+ await assert.rejects(f.g.changeVersion({version:'v2',confirm:true}),/No saved checkpoint/);assert.ok(!f.events.includes('backup'));assert.equal(f.c.running,false);
 });
 test('smaller disk switches through fresh R2 backup, not source snapshot',async()=>{
  const f=versionFixture();await f.g.changeInstance({instance:'standard-3',confirm:true});f.events.length=0;
