@@ -46,7 +46,7 @@ test('configuration renders preset and custom CPU memory disk after a switch',()
 });
 test('snapshot experiment routes and deployment resources are removed',async()=>{
  const config=JSON.parse(await readFile(new URL('../wrangler.jsonc',import.meta.url),'utf8'));const source=await readFile(new URL('../src/index.js',import.meta.url),'utf8');
- assert.equal(config.containers.length,1);assert.equal(config.containers[0].class_name,'DshAgent');assert.equal(config.exports.SnapshotLab,undefined);assert.ok(!config.durable_objects.bindings.some(x=>x.name==='SNAPSHOT_LAB'));assert.doesNotMatch(source,/snapshot-lab|SNAPSHOT_LAB|SnapshotLab/);
+ assert.equal(config.containers.length,1);assert.equal(config.containers[0].class_name,'DshAgent');assert.deepEqual(config.exports.SnapshotLab,{type:'durable-object',state:'deleted'});assert.deepEqual(config.exports.DshAgent,{type:'durable-object',storage:'sqlite'});assert.ok(!config.durable_objects.bindings.some(x=>x.name==='SNAPSHOT_LAB'));assert.doesNotMatch(source,/snapshot-lab|SNAPSHOT_LAB|SnapshotLab/);
 });
 
 test('progress uses plain labels and groups stop/start as one restart step',()=>{

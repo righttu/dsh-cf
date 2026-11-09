@@ -51,6 +51,10 @@
     ]
   },
   "exports": {
+    "SnapshotLab": {
+      "type": "durable-object",
+      "state": "deleted"
+    },
     "DshAgent": {
       "type": "durable-object",
       "storage": "sqlite"

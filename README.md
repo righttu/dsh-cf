@@ -212,6 +212,10 @@ Bridge 标识 sessions-browser-run-v1。旧容器没有 /sessions 时，Worker �
 
 控制台 CPU、内存、硬盘分别展示当前启动配置（停止时为已保存配置）。版本可用性由控制层的已部署命名镜像和保存版本记录比较，不要求容器运行；不是容器内的在线更新检测。停机时可以确认版本升级，流程先唤醒原快照、备份最新 /data，再启动目标镜像并从 R2 恢复，完成后保持运行。这不是纯离线设置下次启动镜像。规格切换仍需先显式唤醒。升级按钮始终可见：可用时橙色，不可用时灰色。快照缩盘实验入口和独立容器配置已移除；历史结果见 experiments/snapshot-resize.md。
 
+## 实验 DO 退役声明
+
+SnapshotLab 曾经部署并创建了持久 DO namespace。移除实验代码、容器与 binding 后，必须在 exports 长期保留 `"SnapshotLab": { "type": "durable-object", "state": "deleted" }` 退役标记，否则平台以 orphaned_provisioned_namespace 拒绝部署。不要把此标记误删，也不要恢复实验类。仅退役实验 namespace；DshAgent 继续保持 sqlite live export，正式工作区与 BACKUPS bucket 不在删除范围。此声明不等于删除 R2 对象或平台快照。
+
 ## 环境切换进度与租户边界
 
 版本/规格操作使用独立持久 environmentProgress 记录真实阶段（包括升级前唤醒、quiesce、R2 备份、安全快照、停止、目标启动、R2 恢复、核验、新快照），versions/progress 不进入操作队列，可在备份等长操作中轮询。进度框显示阶段与失败信息，不伪造字节百分比；刷新读取的是最后报告，不会自动重试操作。
