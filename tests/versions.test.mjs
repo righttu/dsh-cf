@@ -59,3 +59,14 @@ test('Flash adapter has room for tools and reasoning without changing the Gatewa
  assert.match(c,/contextWindow: 131072/);assert.match(c,/maxTokens: 32768/);
  const config=JSON.parse(await readFile(new URL('../wrangler.jsonc',import.meta.url),'utf8'));assert.equal(config.vars.AI_MODEL,'dynamic/dsh');assert.equal(config.vars.AI_GATEWAY_ID,'dsh-cf');
 });
+
+test('demo metrics are above the workspace and detailed timing is collapsed',()=>{
+ const html=page.split('<script>')[0];const ids=[...html.matchAll(/id="([^"]+)"/g)].map(m=>m[1]);assert.equal(ids.length,new Set(ids).size,'each element ID must be unique');
+ assert.ok(html.indexOf('class="demo-metrics"')<html.indexOf('class="layout"'));
+ for(const id of ['boot-ms','first-text-ms'])assert.ok(html.indexOf('id="'+id+'"')<html.indexOf('class="layout"'));
+ const timing=html.match(/<details class="card timing-details"[^>]*>([\s\S]*?)<\/details>/);assert.ok(timing);assert.doesNotMatch(timing[0].split('>')[0],/\bopen\b/);
+ for(const id of ['init-ms','resume-ms','run-model-ms','dispatch-ms','boot-note','stream-state'])assert.ok(timing[1].includes('id="'+id+'"'));
+ assert.ok(html.indexOf('id="wake"')>html.indexOf('id="confirm-restore"'));assert.ok(html.indexOf('id="wake"')<html.indexOf('id="speed-details"'));
+ assert.match(html,/<summary>从备份恢复/);assert.doesNotMatch(html,/从 R2 备份恢复|自定义内存至少 3072 MiB \/ vCPU。费用随规格变化。/);
+ assert.match(html,/min="3072"/);assert.match(html,/其他目录的修改不会迁移/);assert.match(html,/备份之后的新内容不在恢复版本中/);
+});
