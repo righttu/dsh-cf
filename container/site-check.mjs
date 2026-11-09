@@ -1,11 +1,19 @@
-// Agent-run self-check client. The browser runs in Cloudflare Browser Run, not here.
-// Website contract: data-testid=filter-coffee, filter-all, add-item, cart-count,
-// reset-cart; menu cards: data-testid=menu-card and data-category=coffee for coffee.
-// cart-count must contain only its numeric quantity. Agent must repair failures and rerun.
+// Agent-run presentation check; real Chrome runs in Cloudflare Browser Run.
+// Presentation contract (five HTML slides in index.html):
+// data-testid=slide on each slide; exactly one visible. Each slide has a heading.
+// Visible data-testid=slide-prev and slide-next buttons, slide-counter text "1 / 5".
+// First slide: data-testid=total-revenue contains ONLY plain numeric total (commas OK).
+// sales.csv: simple unquoted CSV with headers month,region,revenue; nonnegative revenue.
+// report-data.json: {totalRevenue:number}, actually calculated from sales.csv by Node.
+// Five pages: summary, monthly trend, region comparison, risks, actions + data source.
+// All resources local; real browser checks navigation, CSV totals, overflow and screenshots.
+// Invocation: node /app/site-check.mjs review-deck
 import path from 'node:path';
-import { realpath, writeFile } from 'node:fs/promises';
+import { realpath, open } from 'node:fs/promises';
+import { constants } from 'node:fs';
+async function writeFile(file,value){const handle=await open(file,constants.O_WRONLY|constants.O_CREAT|constants.O_TRUNC|constants.O_NOFOLLOW,0o600);try{await handle.writeFile(value)}finally{await handle.close()}}
 const workspace=await realpath('/data/workspace');
-const root=await realpath(path.resolve(workspace,process.argv[2]||'coffee-site'));
+const root=await realpath(path.resolve(workspace,process.argv[2]||'review-deck'));
 if(root===workspace||!root.startsWith(workspace+path.sep))throw Error('Check a website subdirectory only');
 const relative=path.relative(workspace,root);
 const reportPath=path.join(root,'selfcheck-report.json');

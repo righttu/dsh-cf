@@ -26,7 +26,7 @@ class DirectoryBackup {
   async restore() { await this.intercept(); this.c.events.push('restore'); if (this.c.failRestore) throw Error('restore failed'); }
 }
 `;
-const { DshAgent } = await import('data:text/javascript;base64,' + Buffer.from(prelude + stripped).toString('base64'));
+const { DshAgent, validateInstance } = await import('data:text/javascript;base64,' + Buffer.from(prelude + stripped).toString('base64'));
 function fixture({ running = false, busy = false, revision, backup } = {}) {
   const data = new Map();
   if (revision) data.set('networkRevision', revision);
@@ -357,4 +357,28 @@ test('creating a V1 snapshot does not hide the V2 update',async()=>{
 test('restart failure keeps an explicit operation and its pre-restart safety snapshot',async()=>{
  const f=fixture({running:true,revision:2});await f.g.createSnapshot();const cp=f.data.get('checkpoint');f.c.start=()=>{throw Error('start failed')};
  await assert.rejects(f.g.restart({confirm:true,checkpointAt:cp.at}),/重启未完成/);assert.ok(f.data.get('versionOperation').safety.snapshot);await assert.rejects(f.g.ensure(),/尚未完成/);
+});
+
+test('official runtime sizes and bounded custom sizes are validated',()=>{
+ for(const v of ['lite','standard-1','standard-2','standard-3','standard-4'])assert.equal(validateInstance(v),v);
+ assert.deepEqual(validateInstance({vcpu:2,memoryMib:6144,diskMb:16000}),{vcpu:2,memoryMib:6144,diskMb:16000});
+ for(const v of ['basic','unknown',{vcpu:5,memoryMib:16000,diskMb:16000},{vcpu:2,memoryMib:4096,diskMb:16000},{vcpu:1,memoryMib:4096,diskMb:20001}])assert.throws(()=>validateInstance(v));
+});
+test('resize backs up before stopping, preserves version, and commits selected size',async()=>{
+ const f=versionFixture();const result=await f.g.changeInstance({instance:'standard-2',confirm:true});assert.equal(result.version,'v1');assert.equal(result.instance,'standard-2');
+ const start=f.events.find(e=>Array.isArray(e)&&e[0]==='start');assert.equal(start[1].instance,'standard-2');assert.equal(start[1].image,'current-image');
+ assert.ok(f.events.indexOf('backup')<f.events.indexOf('destroy'));assert.equal(f.data.get('checkpoint').instance,'standard-2');assert.equal(f.data.get('activeInstance'),'standard-2');
+});
+test('resize rejects busy tasks and disk shrinking without stopping',async()=>{
+ const f=versionFixture({busy:true});await assert.rejects(f.g.changeInstance({instance:'standard-2',confirm:true}),/任务/);assert.ok(!f.events.includes('destroy'));
+ f.info.busy=false;await assert.rejects(f.g.changeInstance({instance:'lite',confirm:true}),/缩小磁盘/);assert.ok(!f.events.includes('destroy'));
+});
+test('custom size survives snapshot restart and version switches',async()=>{
+ const f=versionFixture(),size={vcpu:2,memoryMib:6144,diskMb:16000};await f.g.changeInstance({instance:size,confirm:true});
+ f.events.length=0;await f.g.changeVersion({version:'v2',confirm:true});assert.deepEqual(f.events.find(e=>Array.isArray(e)&&e[0]==='start')[1].instance,size);
+ f.events.length=0;await f.g.restart({confirm:true,checkpointAt:f.data.get('checkpoint').at});assert.deepEqual(f.events.find(e=>Array.isArray(e)&&e[0]==='start')[1].instance,size);
+});
+test('failed resizing restores source size only after explicit safety recovery',async()=>{
+ const f=versionFixture();f.c.failRestore=true;await assert.rejects(f.g.changeInstance({instance:'standard-2',confirm:true}));assert.equal(f.data.get('selectedInstance'),undefined);assert.equal(f.data.get('checkpoint').instance,'standard-1');
+ f.c.failRestore=false;await f.g.restoreVersionSafety();assert.equal(f.data.get('activeInstance'),'standard-1');
 });

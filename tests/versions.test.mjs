@@ -13,3 +13,8 @@ test('both images use the same recipe with only the runtime version differing',a
  const images=c.containers[0].images;assert.equal(images.dsh.dockerfile,images.v2.dockerfile);assert.equal(images.v2.build_vars.DSH_APP_VERSION,'v2');
  const d=await readFile(new URL('../Dockerfile',import.meta.url),'utf8');assert.match(d,/ARG DSH_APP_VERSION=v1/);assert.match(d,/\/app\/runtime-version.json/);
 });
+
+test('presentation task replaces coffee task without deleting user files',()=>{
+ assert.match(page,/制作分析演示稿/);assert.match(page,/node \/app\/site-check.mjs review-deck/);assert.doesNotMatch(page,/制作咖啡馆网站|coffee-site/);
+ assert.match(page,/instance-select/);assert.match(page,/暂不支持缩小磁盘/);
+});

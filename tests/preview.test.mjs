@@ -66,8 +66,8 @@ test('preview panel uses a sandboxed iframe, not generated HTML in the console D
 
 test('website automatically self-checks and presents evidence in the agent response', async () => {
  const source=await readFile(new URL('../src/page.js',import.meta.url),'utf8');
- assert.match(source,/自行使用真实浏览器检查并截图/);
- assert.match(source,/node \/app\/site-check.mjs coffee-site/);
+ assert.match(source,/通过 Cloudflare Browser Run 真实检查翻页/);
+ assert.match(source,/node \/app\/site-check.mjs review-deck/);
  assert.ok(source.indexOf('id="evidence-desktop"')>source.indexOf('id="output"'));
  assert.doesNotMatch(source,/id="demo-check"|class="advanced card"/);
  assert.match(source,/allowed-once/);

@@ -6,7 +6,7 @@ import { realpath, stat, readFile } from 'node:fs/promises';
 import path from 'node:path';
 const secret=process.env.DSH_PREVIEW_SECRET;
 let root=null;
-const mime={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.mjs':'text/javascript; charset=utf-8','.json':'application/json','.txt':'text/plain; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.gif':'image/gif','.webp':'image/webp','.ico':'image/x-icon','.woff':'font/woff','.woff2':'font/woff2'};
+const mime={'.csv':'text/csv; charset=utf-8','.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.mjs':'text/javascript; charset=utf-8','.json':'application/json','.txt':'text/plain; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.gif':'image/gif','.webp':'image/webp','.ico':'image/x-icon','.woff':'font/woff','.woff2':'font/woff2'};
 const within=(base,file)=>file===base||file.startsWith(base+path.sep);
 http.createServer(async(req,res)=>{
  const end=(code,text)=>{res.writeHead(code,{'content-type':'text/plain; charset=utf-8'});res.end(text)};

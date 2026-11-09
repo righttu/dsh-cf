@@ -1,3 +1,4 @@
+import { Script } from 'node:vm';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
@@ -44,4 +45,18 @@ test('create missing page target; failed navigation never runs site assertions o
  const binding={async launch(){return {sessionId:'s',targets:[]}},devtools:{async newTarget(){created=true;return {id:'new-page',type:'page'}}},async connectSession(id,options){assert.equal(options.targetId,'new-page');return {webSocket:{async fetch(){return {webSocket:socket}}}}},async closeSession(){}};
  const {report}=await checkWebsite(binding,{});
  assert.equal(created,true);assert.equal(report.failedStage,'navigate');assert.equal(report.failureKind,'navigation');assert.equal(report.passed,false);assert.deepEqual(report.screenshots,[]);assert.equal(commands.includes('Page.captureScreenshot'),false);assert.equal(commands.includes('Runtime.evaluate'),false);
+});
+
+test('presentation checks validate real navigation and data without weakening browser CSP',async()=>{
+ const source=await readFile(new URL('../src/browser-check.js',import.meta.url),'utf8');
+ assert.match(source,/前后翻页与页码一致/);assert.match(source,/CSV、计算结果与显示指标一致/);assert.match(source,/site.fetch/);assert.doesNotMatch(source,/filter-coffee|cart-count/);
+ const preview=await readFile(new URL('../src/preview.js',import.meta.url),'utf8');assert.match(preview,/connect-src 'none'/);assert.match(preview,/text\/csv/);
+});
+
+test('presentation workflow compiles every CDP assertion and checks data through scoped Fetcher',async()=>{
+ const socket=new EventTarget(),expressions=[];socket.accept=()=>{};socket.close=()=>socket.dispatchEvent(new Event('close'));
+ socket.send=text=>{const cmd=JSON.parse(text);if(cmd.method==='Runtime.evaluate'){new Script(cmd.params.expression);expressions.push(cmd.params.expression)}let result={};if(cmd.method==='Runtime.evaluate')result={result:{value:true}};if(cmd.method==='Page.getLayoutMetrics')result={cssContentSize:{width:1280,height:900}};if(cmd.method==='Page.captureScreenshot')result={data:'mock-png-for-unit-test'};queueMicrotask(()=>{const e=new Event('message');e.data=JSON.stringify({id:cmd.id,result});socket.dispatchEvent(e)})};
+ const paths=[],site={async fetch(req){paths.push(new URL(req.url).pathname);return req.url.endsWith('.csv')?new Response('month,region,revenue\n2026-01,South,10\n2026-02,South,20'):Response.json({totalRevenue:30})}};
+ const binding={async launch(){return {sessionId:'s',targets:[{id:'page',type:'page'}]}},async connectSession(){return {webSocket:{async fetch(){return {webSocket:socket}}}}},async closeSession(){}};
+ const {report}=await checkWebsite(binding,site);assert.equal(report.passed,true);assert.deepEqual(paths,['/sales.csv','/report-data.json']);assert.ok(expressions.some(x=>x.includes('shown!==30')));assert.equal(report.screenshots.length,2);
 });

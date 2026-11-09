@@ -37,13 +37,21 @@ export async function checkWebsite(binding,site) {
   const loaded=await check('入口加载',async()=>{const r=await cdp.send('Page.navigate',{url:'http://'+HOST+'/index.html'});if(r.errorText)throw Error(r.errorText);let ready=false;for(let i=0;i<40;i++){try{ready=await evaluate('location.hostname === "'+HOST+'" && document.readyState === "complete" && !!document.title')}catch{}if(ready)break;await new Promise(r=>setTimeout(r,200))}if(!ready)throw Error('Page not ready or missing title')});
   if(!loaded){report.failureKind='navigation';throw Error('入口未成功加载，已停止功能测试和截图')}
   stage='site-checks';
-  const helpers='const find=id=>{const el=[...document.querySelectorAll("[data-testid]")].find(e=>e.dataset.testid===id&&e.getClientRects().length&&getComputedStyle(e).visibility!=="hidden");if(!el)throw Error("Missing visible element: "+id);return el};const tick=()=>new Promise(r=>setTimeout(r,150));';
-  await check('咖啡分类筛选',()=>testJs(helpers+'find("filter-coffee").click();await tick();const cards=[...document.querySelectorAll("[data-testid=menu-card]")].filter(e=>e.getClientRects().length&&getComputedStyle(e).visibility!=="hidden");if(!cards.length||cards.some(e=>e.dataset.category!=="coffee"))throw Error("Coffee filter assertion failed")'));
-  await check('加入购物清单',()=>testJs(helpers+'find("add-item").click();await tick();const n=Number(find("cart-count").textContent);if(!Number.isFinite(n)||n<1)throw Error("Cart count did not increase")'));
-  await check('重置购物清单',()=>testJs(helpers+'find("reset-cart").click();await tick();if(Number(find("cart-count").textContent)!==0)throw Error("Cart count did not reset")'));
-  await check('恢复完整菜单',()=>testJs(helpers+'find("filter-all").click();await tick()'));
+  const helpers='const visible=e=>!!e&&!!e.getClientRects().length&&getComputedStyle(e).visibility!=="hidden";const find=id=>{const el=[...document.querySelectorAll("[data-testid]")].find(e=>e.dataset.testid===id&&visible(e));if(!el)throw Error("Missing visible element: "+id);return el};const tick=()=>new Promise(r=>setTimeout(r,80));const slides=()=>[...document.querySelectorAll("[data-testid=slide]")];const current=()=>{const a=slides().filter(visible);if(a.length!==1)throw Error("Exactly one slide must be visible");return slides().indexOf(a[0])};';
+  await check('演示稿结构与内容',()=>testJs(helpers+'if(slides().length!==5)throw Error("Expected five slides");if(slides().some(s=>!s.querySelector("h1,h2,h3")||s.textContent.trim().length<10))throw Error("Slide content missing");current()'));
+  await check('前后翻页与页码一致',()=>testJs(helpers+'for(let i=0;i<5&&current()>0;i++){find("slide-prev").click();await tick()}if(current()!==0)throw Error("Cannot return to first slide");for(let i=0;i<5;i++){if(current()!==i||Number(find("slide-counter").textContent.split("/")[0].trim())!==i+1)throw Error("Slide/counter mismatch");if(i<4){find("slide-next").click();await tick()}}for(let i=4;i>0;i--){find("slide-prev").click();await tick();if(current()!==i-1)throw Error("Previous slide failed")}'));
+  await check('CSV、计算结果与显示指标一致',async()=>{
+   const a=await site.fetch(new Request('http://'+HOST+'/sales.csv')),r=await site.fetch(new Request('http://'+HOST+'/report-data.json'));
+   if(!a.ok||!r.ok)throw Error('Data files unavailable');
+   const lines=(await a.text()).trim().split(/\r?\n/).map(s=>s.split(',')),header=lines.shift(),col=header.indexOf('revenue');
+   if(col<0||!lines.length)throw Error('Missing revenue CSV column');
+   const values=lines.map(row=>Number(row[col]));if(values.some(n=>!Number.isFinite(n)||n<0))throw Error('Invalid revenue');
+   const total=values.reduce((a,b)=>a+b,0),data=await r.json();if(data.totalRevenue!==total)throw Error('Computed total differs from CSV');
+   await testJs(helpers+'const shown=Number(find("total-revenue").textContent.replace(/[,\\s]/g,""));if(shown!=='+JSON.stringify(total)+')throw Error("Displayed total differs from CSV")');
+  });
   for(const [name,width,height,mobile] of [['selfcheck-desktop.png',1280,900,false],['selfcheck-mobile.png',390,844,true]])await check(name,async()=>{
    await cdp.send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile});await new Promise(r=>setTimeout(r,200));
+   await testJs('if(document.documentElement.scrollWidth>innerWidth+2)throw Error("Horizontal overflow")');
    const metrics=await cdp.send('Page.getLayoutMetrics');const size=metrics.cssContentSize||metrics.contentSize;
    const shot=await cdp.send('Page.captureScreenshot',{format:'png',captureBeyondViewport:true,clip:{x:0,y:0,width:Math.min(size.width,1600),height:Math.min(size.height,6000),scale:1}});
    if(!shot.data||shot.data.length>7*1024*1024)throw Error('Screenshot missing or too large');images[name]=shot.data;report.screenshots.push(name);
