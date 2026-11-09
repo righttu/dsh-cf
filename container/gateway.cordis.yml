@@ -8,8 +8,10 @@
         baseURL: https://api.openai.com/v1
         models:
           - id: dsh-model
-            contextWindow: 65536
-            maxTokens: 8192
+            # Conservative app budgets below current DeepSeek Flash provider limits.
+            # Re-check these declarations if dynamic/dsh changes models.
+            contextWindow: 131072
+            maxTokens: 32768
 - id: agent-default-model
   config:
     provider: cloudflare-gateway

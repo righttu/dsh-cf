@@ -48,3 +48,14 @@ test('snapshot experiment routes and deployment resources are removed',async()=>
  const config=JSON.parse(await readFile(new URL('../wrangler.jsonc',import.meta.url),'utf8'));const source=await readFile(new URL('../src/index.js',import.meta.url),'utf8');
  assert.equal(config.containers.length,1);assert.equal(config.containers[0].class_name,'DshAgent');assert.equal(config.exports.SnapshotLab,undefined);assert.ok(!config.durable_objects.bindings.some(x=>x.name==='SNAPSHOT_LAB'));assert.doesNotMatch(source,/snapshot-lab|SNAPSHOT_LAB|SnapshotLab/);
 });
+
+test('progress uses plain labels and groups stop/start as one restart step',()=>{
+ for(const label of ['启动实例','备份数据','生成快照','重启实例','恢复数据','检查运行状态','保存启动状态'])assert.ok(page.includes(label));
+ assert.match(page,/\['stopping','starting'\]\.includes\(p\.stage\)/);assert.doesNotMatch(page,/\['safety-snapshot','保存原环境安全快照'\]/);
+});
+
+test('Flash adapter has room for tools and reasoning without changing the Gateway route',async()=>{
+ const c=await readFile(new URL('../container/gateway.cordis.yml',import.meta.url),'utf8');
+ assert.match(c,/contextWindow: 131072/);assert.match(c,/maxTokens: 32768/);
+ const config=JSON.parse(await readFile(new URL('../wrangler.jsonc',import.meta.url),'utf8'));assert.equal(config.vars.AI_MODEL,'dynamic/dsh');assert.equal(config.vars.AI_GATEWAY_ID,'dsh-cf');
+});

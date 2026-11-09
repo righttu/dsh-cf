@@ -405,11 +405,17 @@ test('smaller disk switches through fresh R2 backup, not source snapshot',async(
  assert.equal(f.data.get('checkpoint').instance,'standard-1');
 });
 test('insufficient restore space retains larger source checkpoint for explicit recovery',async()=>{
- const f=versionFixture();await f.g.changeInstance({instance:'standard-3',confirm:true});const source=f.data.get('checkpoint');
+ const f=versionFixture();await f.g.changeInstance({instance:'standard-3',confirm:true});const previous=f.data.get('checkpoint');
+ let safety;const start=f.c.start.bind(f.c);f.c.start=o=>{if(o.image)safety=structuredClone(f.data.get('checkpoint'));start(o);};
  const restore=f.g.backups.restore.bind(f.g.backups);f.g.backups.restore=async()=>{throw Error('ENOSPC')};
  await assert.rejects(f.g.changeInstance({instance:'standard-1',confirm:true}),/ENOSPC/);
- assert.equal(f.data.get('checkpoint').snapshot.id,source.snapshot.id);assert.equal(f.data.get('selectedInstance'),'standard-3');assert.equal(f.c.running,false);
- f.g.backups.restore=restore;await f.g.restoreVersionSafety();assert.equal(f.data.get('activeInstance'),'standard-3');assert.equal(f.data.get('versionOperation'),null);
+ const retained=f.data.get('checkpoint');
+ assert.notEqual(safety.snapshot.id,previous.snapshot.id,'switch must save a fresh source snapshot before target startup');
+ assert.equal(retained.snapshot.id,safety.snapshot.id);assert.equal(retained.instance,'standard-3');assert.equal(retained.runtimeVersion,'v1');assert.deepEqual(retained.backup,safety.backup);
+ assert.equal(f.data.get('selectedInstance'),'standard-3');assert.equal(f.c.running,false);
+ f.g.backups.restore=restore;await f.g.restoreVersionSafety();
+ const restoredStart=f.events.filter(e=>Array.isArray(e)&&e[0]==='start').at(-1)[1];assert.equal(restoredStart.containerSnapshot.id,safety.snapshot.id);assert.equal(restoredStart.instance,'standard-3');
+ assert.equal(f.data.get('activeInstance'),'standard-3');assert.equal(f.data.get('versionOperation'),null);
 });
 test('custom size survives snapshot restart and version switches',async()=>{
  const f=versionFixture(),size={vcpu:2,memoryMib:6144,diskMb:16000};await f.g.changeInstance({instance:size,confirm:true});

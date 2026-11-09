@@ -217,3 +217,11 @@ Bridge 标识 sessions-browser-run-v1。旧容器没有 /sessions 时，Worker �
 版本/规格操作使用独立持久 environmentProgress 记录真实阶段（包括升级前唤醒、quiesce、R2 备份、安全快照、停止、目标启动、R2 恢复、核验、新快照），versions/progress 不进入操作队列，可在备份等长操作中轮询。进度框显示阶段与失败信息，不伪造字节百分比；刷新读取的是最后报告，不会自动重试操作。
 
 当前不是多租户：Access 校验 email，但所有请求仍定位 DSH.getByName('owner')。所有获准用户共享同一 DO、容器、SQLite-backed storage 和 /data。BACKUPS binding 指向同一个 R2 bucket，DirectoryBackup 使用 dsh/ + 随机备份 ID，记录由 DO 持久存储选择，不能由请求参数随意指定记录。UUID 和 prefix 不是授权边界。多租户实现必须先验证身份、服务端映射租户 DO、为每个租户保持独立 checkpoint/backup 引用，并实施租户级授权；不能仅放开 Access 多个邮箱。Agent 容器不持有 R2 凭据或 DO SQLite 文件，目录传输通过受限 DirectoryBackupGateway，由 Worker/DO 的 R2 binding 访问 bucket。
+
+## 模型预算修正（2026-11-09）
+
+Workers 模型结构日志观察到两次 length 截断：prompt/completion 分别为 12525/8192、26939/8192，请求 max_completion_tokens=8192；不是这两次输入超过 64K。另有旧长上下文调用 64563/1，需区分输出预算耗尽和上下文挤压。日志只存结构、计数，不存推理原文。DeepSeek Flash 官方当前列出 1M context、384K max output（https://api-docs.deepseek.com/quick_start/pricing/）；应用先保守声明 contextWindow=131072、maxTokens=32768。未改 dynamic/dsh 路由、未关闭 thinking、未自动重试。动态路由换模型时必须重新核对预算；这只是本应用声明，不代表已经验证 Gateway 或适配器支持任意上限。更大预算可能增加费用和耗时。
+
+配置在镜像 /app/gateway.cordis.yml；Worker 部署不会替换旧运行容器或旧快照，必须显式切换至当前构建的新镜像才加载新预算。不要只恢复旧快照并认为预算已更新。32K 仍可能耗尽，不保证任务必成功。
+
+进度框面向用户使用启动实例、备份数据、生成快照、重启实例、恢复数据、检查运行状态、保存启动状态。重启合并了底层停止/启动两阶段。检查由 DshAgent 控制代码发起，桥接服务提供版本/状态/会话；DirectoryBackup 和平台 API 分别执行数据传输、容器生命周期和快照操作。
