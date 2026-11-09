@@ -106,7 +106,7 @@ export class DshAgent extends DurableObject {
   async bridge(path, body) {
     return this.ctx.container.getTcpPort(8080).fetch('http://container' + path, { method: body === undefined ? 'GET' : 'POST', ...(body === undefined ? {} : { body: JSON.stringify(body), headers: { 'content-type': 'application/json' } }) });
   }
-  async assertVersionIdle() { if (await this.ctx.storage.get('versionOperation')) throw Error('版本切换尚未完成，请先恢复切换前环境；不会自动重试或重放任务。'); }
+  async assertVersionIdle() { if (await this.ctx.storage.get('versionOperation')) throw Error('环境操作尚未完成，请先恢复操作前环境；不会自动重试或重放任务。'); }
   async ensure() {
     await this.assertVersionIdle();
     if (!this.setup || !this.ctx.container.running) this.setup = this.boot().catch(e => { this.setup = undefined; throw e; });
@@ -360,7 +360,7 @@ export class DshAgent extends DurableObject {
       catch (e) { await this.ctx.storage.put('checkpointError', diagnosticText(e.message)); throw e; }
     });
   }
-  async saveAndStop() {
+  async saveAndStop({ stop = true } = {}) {
     await this.assertVersionIdle();
     const c = this.ctx.container;
     if (!c.running) return { saved: false, reason: 'already stopped' };
@@ -381,13 +381,60 @@ export class DshAgent extends DurableObject {
     const history = await this.readHistory();
     const backup = await this.backups.backup({ dir: '/data' });
     await this.ctx.storage.put({ latestBackup: backup, latestBackupAt: Date.now() });
-    const snapshot = await c.snapshotContainer({ name: 'dsh-idle' });
+    const snapshot = await c.snapshotContainer({ name: stop ? 'dsh-idle' : 'dsh-manual' });
     await this.ctx.storage.put('checkpoint', { snapshot, backup, image: info.runtimeVersion === 'v2' ? c.images.v2 : c.images.dsh, runtimeVersion: info.runtimeVersion || null, nodeVersion: info.nodeVersion || null, at: Date.now() });
     await this.ctx.storage.put('checkpointHistory', history);
     await this.ctx.storage.delete('checkpointError');
     await this.ctx.storage.delete('routingRecovery');
-    await c.destroy(); this.setup = undefined;
-    return { saved: true };
+    if (stop) { await c.destroy(); this.setup = undefined; }
+    return { saved: true, running: c.running };
+  }
+  async createSnapshot() {
+    await this.lifecycle.start();
+    return this.exclusive(async()=>{
+      const lease=await this.ctx.storage.get('siteCheckLease');
+      if(lease?.expiresAt>Date.now())throw Error('浏览器自检中，请结束后再创建快照。');
+      if(!this.ctx.container.running)throw Error('环境已停止；请先唤醒，未创建空快照。');
+      return this.saveAndStop({stop:false});
+    });
+  }
+  async restart(body) {
+    if(body?.confirm!==true)throw Error('请确认从已保存快照重启。');
+    await this.lifecycle.start();
+    return this.exclusive(async()=>{
+      await this.assertVersionIdle();
+      const cp=await this.ctx.storage.get('checkpoint');
+      if(!cp?.snapshot)throw Error('请先创建快照，再重启。');
+      if(body.checkpointAt!==cp.at)throw Error('快照已变化，请刷新并重新确认。');
+      const lease=await this.ctx.storage.get('siteCheckLease');
+      if(lease?.expiresAt>Date.now())throw Error('浏览器自检中，请结束后再重启。');
+      const c=this.ctx.container;
+      if(!c.running)throw Error('环境已停止，请使用快照唤醒。');
+      const response=await this.bridge('/status');if(!response.ok)throw Error('无法确认任务状态，未停止环境。');
+      const info=await response.json();
+      if(info.busy||info.approvals?.some(a=>a.status==='pending'))throw Error('任务或审批中，请结束后再重启。');
+      const quiet=await this.bridge('/quiesce',{});if(!quiet.ok)throw Error('环境无法安全停止。');
+      const history=await this.readHistory();
+      const safety={snapshot:await c.snapshotContainer({name:'before-manual-restart'}),runtimeVersion:info.runtimeVersion||null,nodeVersion:info.nodeVersion||null,at:Date.now(),history};
+      const op={id:crypto.randomUUID(),kind:'restart',stage:'starting',startedAt:Date.now(),safety};
+      await this.ctx.storage.put('versionOperation',op);
+      try {
+        await c.destroy();this.setup=undefined;
+        await this.ctx.storage.put('routingRecovery',null);
+        this.setup=this.boot().catch(e=>{this.setup=undefined;throw e});await this.setup;
+        const r=await this.bridge('/status');if(!r.ok)throw Error('重启后状态无法读取');
+        const restored=await r.json(), restoredHistory=await this.readHistory();
+        if(cp.runtimeVersion&&restored.runtimeVersion!==cp.runtimeVersion)throw Error('重启后的版本与快照不符');
+        const measurement=await this.ctx.storage.get('lastBoot');
+        await this.ctx.storage.put({lastTask:restored.task||null,checkpointHistory:restoredHistory,lastActivity:Date.now(),responseTiming:null,previewConfig:null,versionOperation:null,lastRestartSafety:safety});
+        this.live=null;
+        return {restarted:true,measurement};
+      }catch(e){
+        try { if(c.running)await c.destroy(); } catch {} this.setup=undefined;
+        await this.ctx.storage.put('versionOperation',{...op,error:diagnosticText(e.message)});
+        throw Error('重启未完成：'+diagnosticText(e.message)+'。请先恢复操作前环境，不要重复提交。');
+      }
+    });
   }
   async recover() {
     await this.lifecycle.start();
@@ -449,14 +496,19 @@ export class DshAgent extends DurableObject {
       const op = await this.ctx.storage.get('versionOperation');
       if (!op) return { restored: false };
       // No automatic replay after a restart/ambiguous response. Explicit user action only.
-      const cp = await this.ctx.storage.get('checkpoint');
+      const cp = op.safety || await this.ctx.storage.get('checkpoint');
       if (!cp?.snapshot) throw Error('没有可用的切换前快照，请保留现场并检查；不会启动空环境。');
       if (this.ctx.container.running) await this.ctx.container.destroy();
       this.setup = undefined;
-      await this.ctx.storage.put('routingRecovery', null);
+      await this.ctx.storage.put('routingRecovery', op.safety || null);
       try {
         this.setup = this.boot().catch(e=>{this.setup=undefined;throw e});
         await this.setup;
+        if(op.safety) {
+          const r=await this.bridge('/status');if(!r.ok)throw Error('安全恢复后状态不可读');
+          const info=await r.json();
+          await this.ctx.storage.put({lastTask:info.task||null,checkpointHistory:await this.readHistory(),lastActivity:Date.now()});
+        }
         await this.ctx.storage.put('versionOperation',null);
         return { restored: true };
       } catch(e) {
@@ -570,6 +622,8 @@ export default {
       else if (u.pathname === '/api/approvals/decide' && request.method === 'POST') {const text=await request.text();if(text.length>2048)return new Response('Too large',{status:413});response=Response.json(await agent.decideApproval(JSON.parse(text)));}
       else if (u.pathname === '/api/status' && request.method === 'GET') response = Response.json(await agent.status());
       else if (u.pathname === '/api/tasks' && request.method === 'POST') { if (Number(request.headers.get('content-length')) > 32768) return new Response('Too large', { status: 413 }); const text = await request.text(); if (text.length > 32768) return new Response('Too large', { status: 413 }); response = await agent.submit(JSON.parse(text)); }
+      else if (u.pathname === '/api/snapshot' && request.method === 'POST') response = Response.json(await agent.createSnapshot());
+      else if (u.pathname === '/api/restart' && request.method === 'POST') { const text=await request.text();if(text.length>2048)return new Response('Too large',{status:413});response=Response.json(await agent.restart(JSON.parse(text))); }
       else if (u.pathname === '/api/checkpoint' && request.method === 'POST') response = Response.json(await agent.checkpoint());
       else if (u.pathname === '/api/recover' && request.method === 'POST') response = Response.json(await agent.recover());
       else response = new Response('Not found', { status: 404 });

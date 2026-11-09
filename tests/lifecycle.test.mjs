@@ -335,3 +335,26 @@ test('a mismatched target version is not committed as success',async()=>{
  const f=versionFixture();const start=f.c.start.bind(f.c);f.c.start=o=>{start(o);f.info.runtimeVersion='v1'};
  await assert.rejects(f.g.changeVersion({version:'v2',confirm:true}),/核验失败/);assert.equal(f.data.get('checkpoint').runtimeVersion,'v1');assert.ok(f.data.get('versionOperation'));assert.equal(f.c.running,false);
 });
+
+test('manual snapshot also backs up data but keeps the instance running',async()=>{
+ const f=fixture({running:true,revision:2});const r=await f.g.createSnapshot();assert.equal(r.saved,true);assert.equal(f.c.running,true);assert.ok(f.events.includes('backup'));assert.ok(f.events.includes('snapshot'));assert.ok(!f.events.includes('destroy'));assert.ok(f.data.get('checkpoint').snapshot);
+});
+test('restart explicitly restores the previously saved snapshot without R2 restore or backup',async()=>{
+ const f=fixture({running:true,revision:2});await f.g.createSnapshot();const cp=f.data.get('checkpoint');f.events.length=0;
+ await f.g.restart({confirm:true,checkpointAt:cp.at});
+ assert.equal(f.c.running,true);assert.ok(!f.events.includes('backup'));assert.ok(!f.events.includes('restore'));
+ const start=f.events.find(e=>Array.isArray(e)&&e[0]==='start')[1];assert.equal(start.containerSnapshot.id,cp.snapshot.id);assert.equal(start.image,undefined);
+ assert.equal(f.data.get('versionOperation'),null);assert.ok(f.data.get('lastRestartSafety').snapshot);
+});
+test('restart rejects missing/stale checkpoints and busy tasks before destroying',async()=>{
+ const f=fixture({running:true,revision:2});await assert.rejects(f.g.restart({confirm:true}),/先创建快照/);
+ await f.g.createSnapshot();const cp=f.data.get('checkpoint');await assert.rejects(f.g.restart({confirm:true,checkpointAt:cp.at-1}),/已变化/);
+ f.info.busy=true;await assert.rejects(f.g.restart({confirm:true,checkpointAt:cp.at}),/任务/);assert.ok(!f.events.includes('destroy'));
+});
+test('creating a V1 snapshot does not hide the V2 update',async()=>{
+ const f=versionFixture();await f.g.createSnapshot();const v=await f.g.versions(f.info);assert.equal(v.current,'v1');assert.equal(v.latest,'v2');assert.ok(v.available.includes('v2'));
+});
+test('restart failure keeps an explicit operation and its pre-restart safety snapshot',async()=>{
+ const f=fixture({running:true,revision:2});await f.g.createSnapshot();const cp=f.data.get('checkpoint');f.c.start=()=>{throw Error('start failed')};
+ await assert.rejects(f.g.restart({confirm:true,checkpointAt:cp.at}),/重启未完成/);assert.ok(f.data.get('versionOperation').safety.snapshot);await assert.rejects(f.g.ensure(),/尚未完成/);
+});
