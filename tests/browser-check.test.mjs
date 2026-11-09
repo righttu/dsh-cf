@@ -55,8 +55,12 @@ test('presentation checks validate real navigation and data without weakening br
 
 test('presentation workflow compiles every CDP assertion and checks data through scoped Fetcher',async()=>{
  const socket=new EventTarget(),expressions=[];socket.accept=()=>{};socket.close=()=>socket.dispatchEvent(new Event('close'));
- socket.send=text=>{const cmd=JSON.parse(text);if(cmd.method==='Runtime.evaluate'){new Script(cmd.params.expression);expressions.push(cmd.params.expression)}let result={};if(cmd.method==='Runtime.evaluate')result={result:{value:true}};if(cmd.method==='Page.getLayoutMetrics')result={cssContentSize:{width:1280,height:900}};if(cmd.method==='Page.captureScreenshot')result={data:'mock-png-for-unit-test'};queueMicrotask(()=>{const e=new Event('message');e.data=JSON.stringify({id:cmd.id,result});socket.dispatchEvent(e)})};
+ socket.send=text=>{const cmd=JSON.parse(text);if(cmd.method==='Runtime.evaluate'){new Script(cmd.params.expression);expressions.push(cmd.params.expression)}let result={};if(cmd.method==='Runtime.evaluate')result={result:{value:true}};if(cmd.method==='Page.getLayoutMetrics')result={cssContentSize:{width:1280,height:720}};if(cmd.method==='Page.captureScreenshot')result={data:'mock-png-for-unit-test'};queueMicrotask(()=>{const e=new Event('message');e.data=JSON.stringify({id:cmd.id,result});socket.dispatchEvent(e)})};
  const paths=[],site={async fetch(req){paths.push(new URL(req.url).pathname);return req.url.endsWith('.csv')?new Response('month,region,revenue\n2026-01,South,10\n2026-02,South,20'):Response.json({totalRevenue:30})}};
  const binding={async launch(){return {sessionId:'s',targets:[{id:'page',type:'page'}]}},async connectSession(){return {webSocket:{async fetch(){return {webSocket:socket}}}}},async closeSession(){}};
- const {report}=await checkWebsite(binding,site);assert.equal(report.passed,true);assert.deepEqual(paths,['/sales.csv','/report-data.json']);assert.ok(expressions.some(x=>x.includes('shown!==30')));assert.equal(report.screenshots.length,2);
+ const {report}=await checkWebsite(binding,site);assert.equal(report.passed,true);assert.deepEqual(paths,['/sales.csv','/report-data.json']);assert.ok(expressions.some(x=>x.includes('shown!==30')));assert.deepEqual(report.screenshots,['selfcheck-desktop.png']);
+});
+
+test('only landscape desktop screenshots are requested and every page has a layout check',async()=>{
+ const source=await readFile(new URL('../src/browser-check.js',import.meta.url),'utf8');assert.match(source,/桌面宽屏逐页布局/);assert.match(source,/width:1280,height:720/);assert.doesNotMatch(source,/selfcheck-mobile|390,844,true/);
 });

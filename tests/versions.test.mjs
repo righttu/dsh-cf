@@ -70,3 +70,9 @@ test('demo metrics are above the workspace and detailed timing is collapsed',()=
  assert.match(html,/<summary>从备份恢复/);assert.doesNotMatch(html,/从 R2 备份恢复|自定义内存至少 3072 MiB \/ vCPU。费用随规格变化。/);
  assert.match(html,/min="3072"/);assert.match(html,/其他目录的修改不会迁移/);assert.match(html,/备份之后的新内容不在恢复版本中/);
 });
+
+test('approval action is orange and reachable while desktop slides never use a phone viewport',()=>{
+ assert.match(page,/b.className=outcome==='allowed-once'\?'btn approval-allow':'btn'/);assert.match(page,/#approvals-panel \.approval-allow,#approval-jump\{background:var\(--orange\)/);assert.match(page,/待授权 /);assert.match(page,/scrollIntoView/);
+ assert.match(page,/桌面宽屏 16:9（1280×720）/);assert.match(page,/不为本任务安装软件或下载依赖/);assert.match(page,/不把一次授权当成持续授权/);assert.match(page,/new ResizeObserver/);assert.match(page,/width:1280px!important;height:720px!important/);
+ assert.ok(page.includes("[['evidence-desktop','selfcheck-desktop.png']]"));assert.ok(!page.includes("['evidence-mobile','selfcheck-mobile.png']"));
+});
