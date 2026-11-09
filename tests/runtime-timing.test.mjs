@@ -54,3 +54,7 @@ test('actual bridge session preparation initializes once then reports runtime re
   await module.closeHarness();
   const secondId='22222222-2222-4222-8222-222222222222';selectSession(module.state,{action:'create',id:secondId});const independent=await module.getSession({});assert.equal(independent.id,secondId);assert.deepEqual(module.counts.materialized,[id,secondId]);assert.equal(module.counts.resume,2);await module.closeHarness();
 });
+
+test('SDK initial handshake has an explicit bounded cold-start window',async()=>{
+ const source=await readFile(new URL('../container/server.mjs',import.meta.url),'utf8');assert.match(source,/initializeTimeoutMs: 60000/);assert.match(source,/approvalRequests: true/);assert.match(source,/await timeStage\(timing, 'initialize', \(\) => harness.start\(\)\)/);
+});

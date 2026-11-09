@@ -26,7 +26,7 @@ async function getSession(timing) {
   timing.initializeMs = 0; timing.resumeMs = 0;
   if (session) { timing.runtimeId = runtimeId; return session; }
   runtimeId = crypto.randomUUID(); timing.runtimeId = runtimeId;
-  harness = new DeepSeekHarness({ profile: 'sdk', dshHome: '/data/dsh-home', cwd: '/data/workspace', processCwd: '/data/workspace', patches: ['/app/gateway.cordis.yml'], provider: 'cloudflare-gateway', model: 'dsh-model', approvalRequests: true, env: { PATH: process.env.PATH, HOME: '/data', DSH_GATEWAY_PLACEHOLDER: 'cloudflare-binding-no-secret', DSH_TELEMETRY_DISABLED: '1', NODE_EXTRA_CA_CERTS: '/etc/cloudflare/certs/cloudflare-containers-ca.crt' }, onUserQuestion: async () => ({ cancelled: true }), shutdownTimeoutMs: 15000, disposeEofGraceMs: 15000 });
+  harness = new DeepSeekHarness({ profile: 'sdk', dshHome: '/data/dsh-home', cwd: '/data/workspace', processCwd: '/data/workspace', patches: ['/app/gateway.cordis.yml'], provider: 'cloudflare-gateway', model: 'dsh-model', approvalRequests: true, initializeTimeoutMs: 60000, env: { PATH: process.env.PATH, HOME: '/data', DSH_GATEWAY_PLACEHOLDER: 'cloudflare-binding-no-secret', DSH_TELEMETRY_DISABLED: '1', NODE_EXTRA_CA_CERTS: '/etc/cloudflare/certs/cloudflare-containers-ca.crt' }, onUserQuestion: async () => ({ cancelled: true }), shutdownTimeoutMs: 15000, disposeEofGraceMs: 15000 });
   // Each SDK approval waits for the authenticated console owner; never auto-grant.
   harness.client.start();
   harness.client.onRequest((method, params) => method === 'approval/request' ? approvals.request(params, state.task?.id) : Promise.reject(new Error('Unsupported host request')));

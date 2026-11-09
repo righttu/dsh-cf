@@ -60,9 +60,9 @@ test('Flash adapter has room for tools and reasoning without changing the Gatewa
  const config=JSON.parse(await readFile(new URL('../wrangler.jsonc',import.meta.url),'utf8'));assert.equal(config.vars.AI_MODEL,'dynamic/dsh');assert.equal(config.vars.AI_GATEWAY_ID,'dsh-cf');
 });
 
-test('demo metrics are above the workspace and detailed timing is collapsed',()=>{
+test('demo timings are inline in the topbar and detailed timing is collapsed',()=>{
  const html=page.split('<script>')[0];const ids=[...html.matchAll(/id="([^"]+)"/g)].map(m=>m[1]);assert.equal(ids.length,new Set(ids).size,'each element ID must be unique');
- assert.ok(html.indexOf('class="demo-metrics"')<html.indexOf('class="layout"'));
+ const header=html.match(/<header class="topbar">([\s\S]*?)<\/header>/)[1];assert.ok(header.includes('class="topbar-metrics"'));assert.ok(!html.includes('class="demo-metrics"'));for(const id of ['boot-ms','first-text-ms'])assert.ok(header.includes('id="'+id+'"'));
  for(const id of ['boot-ms','first-text-ms'])assert.ok(html.indexOf('id="'+id+'"')<html.indexOf('class="layout"'));
  const timing=html.match(/<details class="card timing-details"[^>]*>([\s\S]*?)<\/details>/);assert.ok(timing);assert.doesNotMatch(timing[0].split('>')[0],/\bopen\b/);
  for(const id of ['init-ms','resume-ms','run-model-ms','dispatch-ms','boot-note','stream-state'])assert.ok(timing[1].includes('id="'+id+'"'));
@@ -75,4 +75,9 @@ test('approval action is orange and reachable while desktop slides never use a p
  assert.match(page,/b.className=outcome==='allowed-once'\?'btn approval-allow':'btn'/);assert.match(page,/#approvals-panel \.approval-allow,#approval-jump\{background:var\(--orange\)/);assert.match(page,/待授权 /);assert.match(page,/scrollIntoView/);
  assert.match(page,/桌面宽屏 16:9（1280×720）/);assert.match(page,/不为本任务安装软件或下载依赖/);assert.match(page,/不把一次授权当成持续授权/);assert.match(page,/new ResizeObserver/);assert.match(page,/width:1280px!important;height:720px!important/);
  assert.ok(page.includes("[['evidence-desktop','selfcheck-desktop.png']]"));assert.ok(!page.includes("['evidence-mobile','selfcheck-mobile.png']"));
+});
+
+test('version update precedes instance controls and console zones have distinct hierarchy',()=>{
+ const html=page.split('<script>')[0];assert.ok(html.indexOf('id="upgrade-version"')<html.indexOf('id="instance-cpu-current"'));assert.ok(html.indexOf('id="upgrade-version"')<html.indexOf('id="instance-select"'));assert.ok(html.includes('environment-heading">版本更新'));assert.ok(html.includes('environment-heading">实例管理'));
+ assert.match(page,/topbar-metrics strong/);assert.match(page,/background:#eef2e8/);assert.match(page,/background:#e0e8d6/);
 });
