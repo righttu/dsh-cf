@@ -5,7 +5,7 @@ import { readFile } from 'node:fs/promises';
 // Exercise the actual control-plane source with platform interfaces replaced by
 // deterministic in-memory doubles. No Cloudflare account, network or model calls.
 const source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8');
-const stripped = source.replace(/^import .*;\n/gm, '').replace(/^export \{ DirectoryBackupGateway \} from .*;\n/gm, '');
+const stripped = source.replace(/^import .*;\n/gm, '').replace(/^export \{ (DirectoryBackupGateway|SnapshotLab) \} from .*;\n/gm, '');
 const prelude = `
 import { normalizeTask } from ${JSON.stringify(new URL('../container/history.mjs', import.meta.url).href)};
 const page = '';

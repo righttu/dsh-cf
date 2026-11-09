@@ -2,6 +2,8 @@ import { DurableObject, WorkerEntrypoint } from 'cloudflare:workers';
 import { Lifecycle } from 'agents/lifecycle';
 import { DirectoryBackup } from '@cloudflare/sandbox';
 import { page } from './page.js';
+import { labPage } from './snapshot-lab.js';
+export { SnapshotLab } from './snapshot-lab.js';
 import { normalizeTask } from '../container/history.mjs';
 import { previewServer, previewHeaders } from './preview.js';
 import { observeChatStream, chatResponseMeta } from './model-stream.js';
@@ -614,6 +616,7 @@ export default {
     if (!identity?.email) return new Response('Email identity required', { status: 403 });
     const u = new URL(request.url);
     if (u.pathname === '/' && request.method === 'GET') return new Response(page, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer', 'content-security-policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self'; frame-src 'self'; base-uri 'none'; frame-ancestors 'none'" } });
+    if (u.pathname === '/snapshot-lab' && request.method === 'GET') return new Response(labPage, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-frame-options': 'DENY', 'content-security-policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'" } });
     // Preview documents have an opaque sandbox origin; only their read-only route accepts Origin:null.
     const preview = /^\/preview\/([a-f0-9-]{36})\/(.*)$/.exec(u.pathname);
     if (preview && request.method === 'GET') {
@@ -626,7 +629,10 @@ export default {
     const agent = env.DSH.getByName('owner');
     try {
       let response;
-      if (u.pathname === '/api/events' && request.method === 'GET') response = await agent.events(u.searchParams.get('taskId'));
+      if (u.pathname === '/api/snapshot-lab' && request.method === 'GET') response = Response.json(await env.SNAPSHOT_LAB.getByName('isolated-disk-test').status());
+      else if (u.pathname === '/api/snapshot-lab/step' && request.method === 'POST') response = Response.json(await env.SNAPSHOT_LAB.getByName('isolated-disk-test').step());
+      else if (u.pathname === '/api/snapshot-lab/reset' && request.method === 'POST') response = Response.json(await env.SNAPSHOT_LAB.getByName('isolated-disk-test').reset());
+      else if (u.pathname === '/api/events' && request.method === 'GET') response = await agent.events(u.searchParams.get('taskId'));
       else if (u.pathname === '/api/preview/open' && request.method === 'POST') {
         const text = await request.text();
         if (text.length > 2048) return new Response('Too large', { status: 413 });

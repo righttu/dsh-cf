@@ -40,6 +40,11 @@
           }
         }
       }
+    },
+    {
+      "class_name": "SnapshotLab",
+      "scheduling_policy": "durable_object",
+      "images": { "dsh": { "dockerfile": "./Dockerfile" } }
     }
   ],
   "durable_objects": {
@@ -47,10 +52,12 @@
       {
         "name": "DSH",
         "class_name": "DshAgent"
-      }
+      },
+      { "name": "SNAPSHOT_LAB", "class_name": "SnapshotLab" }
     ]
   },
   "exports": {
+    "SnapshotLab": { "type": "durable-object", "storage": "sqlite" },
     "DshAgent": {
       "type": "durable-object",
       "storage": "sqlite"
