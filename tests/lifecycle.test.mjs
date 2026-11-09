@@ -440,3 +440,19 @@ test('failed resizing restores source size only after explicit safety recovery',
  const f=versionFixture();f.c.failRestore=true;await assert.rejects(f.g.changeInstance({instance:'standard-2',confirm:true}));assert.equal(f.data.get('selectedInstance'),undefined);assert.equal(f.data.get('checkpoint').instance,'standard-1');
  f.c.failRestore=false;await f.g.restoreVersionSafety();assert.equal(f.data.get('activeInstance'),'standard-1');
 });
+
+test('durable progress reports backup before version operation is created and can be polled without queue lock',async()=>{
+ const f=versionFixture(),stages=[];const put=f.g.ctx.storage.put.bind(f.g.ctx.storage);
+ f.g.ctx.storage.put=async(k,v)=>{if(k==='environmentProgress')stages.push(v.stage);return put(k,v);};
+ let release,entered;const gate=new Promise(r=>release=r),seen=new Promise(r=>entered=r);const backup=f.g.backups.backup.bind(f.g.backups);
+ f.g.backups.backup=async()=>{entered();await gate;return backup();};
+ const work=f.g.changeVersion({version:'v2',confirm:true});await seen;
+ const live=await f.g.versionProgress();assert.equal(live.progress.stage,'backing-up');assert.equal(live.progress.status,'running');assert.equal(live.operation,null);
+ release();await work;const done=await f.g.versionProgress();assert.equal(done.progress.status,'completed');
+ const expected=['quiescing','backing-up','safety-snapshot','stopping','starting','restoring','validating','checkpointing','complete'];
+ for(let i=1;i<expected.length;i++)assert.ok(stages.indexOf(expected[i-1])<stages.indexOf(expected[i]));
+});
+test('failed R2 restore leaves persistent failed progress at the actual stage',async()=>{
+ const f=versionFixture();f.c.failRestore=true;await assert.rejects(f.g.changeInstance({instance:'standard-2',confirm:true}));
+ const status=await f.g.versionProgress();assert.equal(status.progress.kind,'resize');assert.equal(status.progress.status,'failed');assert.equal(status.progress.stage,'restoring');assert.match(status.progress.error,/restore failed/);assert.ok(status.operation);assert.equal(f.data.get('checkpoint').runtimeVersion,'v1');
+});

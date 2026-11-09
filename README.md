@@ -211,3 +211,9 @@ Bridge 标识 sessions-browser-run-v1。旧容器没有 /sessions 时，Worker �
 任务示例改为 review-deck 五页 HTML 季度分析演示稿，不是 PPTX 或永久部署。Agent 从现有 CSV 接续或创建明确标注的合成数据，通过 Node 实际计算 report-data.json 与页面。私有 Browser Run 校验五页结构、翻页/页码、CSV总额与JSON/页面一致、截图和视口溢出。数据由受限 Fetcher 读取，不放开页面 CSP connect-src。预览新增只读 CSV MIME 支持；旧咖啡馆文件不会被删除或改名。
 
 控制台 CPU、内存、硬盘分别展示当前启动配置（停止时为已保存配置）。版本可用性由控制层的已部署命名镜像和保存版本记录比较，不要求容器运行；不是容器内的在线更新检测。停机时可以确认版本升级，流程先唤醒原快照、备份最新 /data，再启动目标镜像并从 R2 恢复，完成后保持运行。这不是纯离线设置下次启动镜像。规格切换仍需先显式唤醒。升级按钮始终可见：可用时橙色，不可用时灰色。快照缩盘实验入口和独立容器配置已移除；历史结果见 experiments/snapshot-resize.md。
+
+## 环境切换进度与租户边界
+
+版本/规格操作使用独立持久 environmentProgress 记录真实阶段（包括升级前唤醒、quiesce、R2 备份、安全快照、停止、目标启动、R2 恢复、核验、新快照），versions/progress 不进入操作队列，可在备份等长操作中轮询。进度框显示阶段与失败信息，不伪造字节百分比；刷新读取的是最后报告，不会自动重试操作。
+
+当前不是多租户：Access 校验 email，但所有请求仍定位 DSH.getByName('owner')。所有获准用户共享同一 DO、容器、SQLite-backed storage 和 /data。BACKUPS binding 指向同一个 R2 bucket，DirectoryBackup 使用 dsh/ + 随机备份 ID，记录由 DO 持久存储选择，不能由请求参数随意指定记录。UUID 和 prefix 不是授权边界。多租户实现必须先验证身份、服务端映射租户 DO、为每个租户保持独立 checkpoint/backup 引用，并实施租户级授权；不能仅放开 Access 多个邮箱。Agent 容器不持有 R2 凭据或 DO SQLite 文件，目录传输通过受限 DirectoryBackupGateway，由 Worker/DO 的 R2 binding 访问 bucket。
