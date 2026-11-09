@@ -462,3 +462,11 @@ test('failed R2 restore leaves persistent failed progress at the actual stage',a
  const f=versionFixture();f.c.failRestore=true;await assert.rejects(f.g.changeInstance({instance:'standard-2',confirm:true}));
  const status=await f.g.versionProgress();assert.equal(status.progress.kind,'resize');assert.equal(status.progress.status,'failed');assert.equal(status.progress.stage,'restoring');assert.match(status.progress.error,/restore failed/);assert.ok(status.operation);assert.equal(f.data.get('checkpoint').runtimeVersion,'v1');
 });
+
+test('session deletion removes cached task replies and refuses old bridge capability',async()=>{
+ const f=fixture({running:true});let supported=false;
+ f.g.bridge=async path=>Response.json(path==='/sessions'?{deletedTaskIds:['a','b'],sessions:[],sessionId:'next'}:{sessionsSupported:true,sessionDeletionSupported:supported,busy:false,task:null});
+ f.data.set('request:a',{id:'a'});f.data.set('request:b',{id:'b'});f.data.set('request:keep',{id:'keep'});
+ await assert.rejects(f.g.changeSession({action:'delete',id:'old'}),/不支持删除/);assert.ok(f.data.has('request:a'));
+ supported=true;await f.g.changeSession({action:'delete',id:'old'});assert.equal(f.data.has('request:a'),false);assert.equal(f.data.has('request:b'),false);assert.equal(f.data.has('request:keep'),true);
+});

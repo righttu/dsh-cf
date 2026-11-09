@@ -51,3 +51,16 @@ export function observeChatStream(body, report, reportMeta = () => {}) {
     async flush() { buffer += decoder.decode(); if (buffer.trim()) await frame(buffer); await emit(true); try { await reportMeta(meta); } catch {} }
   }));
 }
+
+// Count shape/length only. Character counts are NOT token counts.
+export function chatRequestMeta(input) {
+  const roles={system:0,developer:0,user:0,assistant:0,tool:0,other:0},contentChars={...roles};
+  let reasoningChars=0,toolArgumentChars=0;
+  for(const message of input.messages||[]){
+    const role=Object.hasOwn(roles,message.role)?message.role:'other';roles[role]++;
+    contentChars[role]+=typeof message.content==='string'?message.content.length:message.content==null?0:JSON.stringify(message.content).length;
+    reasoningChars+=typeof message.reasoning_content==='string'?message.reasoning_content.length:0;
+    for(const call of message.tool_calls||[])toolArgumentChars+=typeof call.function?.arguments==='string'?call.function.arguments.length:0;
+  }
+  return {stream:input.stream===true,max_tokens:Number.isFinite(input.max_tokens)?input.max_tokens:null,max_completion_tokens:Number.isFinite(input.max_completion_tokens)?input.max_completion_tokens:null,messageCount:(input.messages||[]).length,roles,contentChars,reasoningChars,toolArgumentChars,toolCount:(input.tools||[]).length,toolDefinitionChars:JSON.stringify(input.tools||[]).length};
+}

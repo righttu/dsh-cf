@@ -27,8 +27,8 @@ test('actual bridge session preparation initializes once then reports runtime re
     class DeepSeekHarness {
       client = { start() {}, onRequest() {} };
       async start() { counts.initialize++; }
-      async resumeSession() { counts.resume++; return {}; }
-      session(id) { return { async getWorkingDirectory() { (counts.materialized ||= []).push(id); return '/data/workspace'; } }; }
+      async resumeSession(id) { counts.resume++; return {id}; }
+      session(id) { return { id, async getWorkingDirectory() { (counts.materialized ||= []).push(id); return '/data/workspace'; } }; }
       async close() {}
     }
   `);
@@ -52,4 +52,5 @@ test('actual bridge session preparation initializes once then reports runtime re
   await module.closeHarness();await module.getSession({});
   assert.equal(module.counts.resume,2);assert.deepEqual(module.counts.materialized,[id]);
   await module.closeHarness();
+  const secondId='22222222-2222-4222-8222-222222222222';selectSession(module.state,{action:'create',id:secondId});const independent=await module.getSession({});assert.equal(independent.id,secondId);assert.deepEqual(module.counts.materialized,[id,secondId]);assert.equal(module.counts.resume,2);await module.closeHarness();
 });

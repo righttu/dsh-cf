@@ -33,13 +33,16 @@ async function getSession(timing) {
   try {
     await timeStage(timing, 'initialize', () => harness.start());
     const current = state.sessions.find(s => s.id === state.sessionId);
-    if (current.initialized) session = await timeStage(timing, 'resume', () => harness.resumeSession(current.id));
+    const restoring=current.initialized;
+    if (restoring) session = await timeStage(timing, 'resume', () => harness.resumeSession(current.id));
     else {
       session = harness.session(current.id);
       // Materialize the named session durably before marking it resumable.
       await session.getWorkingDirectory();
       current.initialized = true; await save();
     }
+    if(session.id!==current.id)throw Error('DSH 会话标识与所选会话不一致，拒绝提交任务');
+    console.log('DSH_SESSION_CONTEXT',JSON.stringify({sessionId:current.id,runtimeId,mode:restoring?'resume':'new'}));
     return session;
   } catch (e) { await harness.close(); harness = undefined; session = undefined; throw e; }
 }
@@ -66,7 +69,7 @@ async function run(prompt) {
     console.log('DSH_PREPARE_TIMING', JSON.stringify({ taskId: state.task.id, ...timing }));
     const result = await s.run(prompt);
     timing.agentMs = Date.now() - timing.beforeRunAt; timing.phase = 'finished';
-    state.sessionId = result.sessionId;
+    if(result.sessionId!==state.sessionId)throw Error('DSH 返回了不同会话标识，未自动切换会话');
     const terminal = result.events?.findLast(event => event.type === 'turn/end');
     const failed = result.finishReason === 'error';
     const error = failed ? (safeDiagnostic(terminal?.data?.reason) || result.finalResponse || 'DSH returned error without a terminal diagnostic; inspect AI Gateway logs.') : undefined;
@@ -92,7 +95,7 @@ http.createServer(async (req, res) => {
       if(busy)return reply(res,409,{error:'任务或会话操作正在执行，请结束后再切换'});
       busy=true;
       const previous=structuredClone(state);
-      try { await closeHarness(); await approvals.cancelAll(); updateHistory(state); selectSession(state,body); await save(); return reply(res,200,sessionView(state)); }
+      try { await closeHarness(); await approvals.cancelAll(); updateHistory(state); const deletedTaskIds=body.action==='delete'?(state.history||[]).filter(t=>t.sessionId===body.id).map(t=>t.id):[];selectSession(state,body);await save();return reply(res,200,{...sessionView(state),deletedTaskIds}); }
       catch(e) { previous.approvals=approvals.records; state=previous; throw e; }
       finally {busy=false;}
     }

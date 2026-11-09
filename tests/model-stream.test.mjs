@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { observeChatStream, chatResponseMeta } from '../src/model-stream.js';
+import { observeChatStream, chatResponseMeta, chatRequestMeta } from '../src/model-stream.js';
 const encoder = new TextEncoder();
 const frame = delta => 'data: ' + JSON.stringify({ choices: [{ index: 0, delta }] }) + '\r\n\r\n';
 
@@ -47,4 +47,9 @@ test('model diagnostics report structural evidence, never reasoning or tool argu
  const stream=new ReadableStream({start(c){c.enqueue(new TextEncoder().encode(sse));c.close()}});
  assert.equal(await new Response(observeChatStream(stream,()=>{},m=>{final=m})).text(),sse);
  assert.equal(final.finishReason,'length');assert.equal(final.contentChars,0);assert.equal(final.reasoningPresent,true);
+});
+
+test('request diagnostics contain counts and lengths, never history content',()=>{
+ const input={stream:true,max_completion_tokens:32768,messages:[{role:'system',content:'private system'},{role:'user',content:'private user'},{role:'assistant',content:'answer',reasoning_content:'private reasoning',tool_calls:[{function:{arguments:'private arguments'}}]},{role:'tool',content:'private tool result'}],tools:[{function:{name:'private tool name'}}]};
+ const meta=chatRequestMeta(input);assert.equal(meta.messageCount,4);assert.equal(meta.roles.user,1);assert.equal(meta.roles.tool,1);assert.equal(meta.toolCount,1);assert.equal(meta.reasoningChars,17);assert.equal(meta.max_completion_tokens,32768);assert.doesNotMatch(JSON.stringify(meta),/private|answer/);
 });

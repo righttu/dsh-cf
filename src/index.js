@@ -4,7 +4,7 @@ import { DirectoryBackup } from '@cloudflare/sandbox';
 import { page } from './page.js';
 import { normalizeTask } from '../container/history.mjs';
 import { previewServer, previewHeaders } from './preview.js';
-import { observeChatStream, chatResponseMeta } from './model-stream.js';
+import { observeChatStream, chatResponseMeta, chatRequestMeta } from './model-stream.js';
 import { checkWebsite } from './browser-check.js';
 export { DirectoryBackupGateway } from '@cloudflare/sandbox';
 export function validateInstance(value) {
@@ -32,11 +32,11 @@ export class Outbound extends WorkerEntrypoint {
     try {
       const input = await request.json();
       delete input.model;
-      console.log('DSH_MODEL_REQUEST_META', JSON.stringify({ stream: input.stream === true, max_tokens: Number.isFinite(input.max_tokens) ? input.max_tokens : null, max_completion_tokens: Number.isFinite(input.max_completion_tokens) ? input.max_completion_tokens : null }));
       const model = this.env.AI_MODEL;
       stage = 'ai-binding';
       const agent = this.env.DSH.getByName('owner');
       const call = await agent.beginModelCall().catch(() => null);
+      console.log('DSH_MODEL_REQUEST_META',JSON.stringify({taskId:call?.taskId||null,sessionId:call?.sessionId||null,callIndex:call?.callIndex||null,...chatRequestMeta(input)}));
       if (!model || model.startsWith('@cf/')) throw new Error('Configure AI_MODEL as a Gateway catalog model or dynamic route (OpenAI chat format).');
       const output = await this.env.AI.run(model, input, { gateway: { id: this.env.AI_GATEWAY_ID || 'default', skipCache: true } });
       const report = update => call ? agent.modelProgress({ ...call, ...update }) : Promise.resolve();
@@ -245,10 +245,11 @@ export class DshAgent extends DurableObject {
       try { const r = await this.bridge('/status'); if (r.ok) { const info = await r.json(); if (info.task && info.task.id === task?.id) { task = info.task; runtime = info.task.timings || null; runToModelMs = Number.isFinite(info.runElapsedMs) ? info.runElapsedMs : null; } } } catch {}
       const anchor = await this.ctx.storage.get('taskTimingStart');
       const taskStartedAt = anchor?.id === task?.id && Number.isFinite(anchor?.acceptedAt) ? anchor.acceptedAt : null;
-      const call = { taskId: task?.id || null, callId: crypto.randomUUID(), startedAt: Date.now(), taskStartedAt };
+      const call = { taskId: task?.id || null, sessionId: task?.sessionId || null, callId: crypto.randomUUID(), startedAt: Date.now(), taskStartedAt };
       const previous = await this.ctx.storage.get('responseTiming');
       const timing = previous?.taskId === call.taskId && previous.timingVersion === 2 ? previous : { timingVersion: 2, taskId: call.taskId, firstModelAt: call.startedAt, dispatchDelayMs: taskStartedAt != null ? call.startedAt - taskStartedAt : null, runtime, runToModelMs };
       if (previous?.taskId !== call.taskId) console.log('DSH_PREMODEL_BREAKDOWN', JSON.stringify({ taskId: task?.id, dispatchDelayMs: timing.dispatchDelayMs, runtime, runToModelMs: timing.runToModelMs }));
+      call.callIndex=(timing.modelCalls||0)+1;timing.modelCalls=call.callIndex;
       await this.ctx.storage.put('responseTiming', timing);
       this.live = { ...call, ...timing, text: '', done: false };
       this.publishLive();
@@ -310,15 +311,17 @@ export class DshAgent extends DurableObject {
     });
   }
   async changeSession(body) {
-    if (!body || !['create','select'].includes(body.action) || typeof body.id !== 'string' || body.id.length>100) throw Error('无效会话操作');
+    if (!body || !['create','select','delete'].includes(body.action) || typeof body.id !== 'string' || body.id.length>100) throw Error('无效会话操作');
     await this.lifecycle.start();
     return this.exclusive(async()=>{
       await this.ensure();
       const status=await (await this.bridge('/status')).json();
       if(status.busy)throw Error('任务正在执行，请结束后再切换会话');
       if(!status.sessionsSupported)throw Error('当前容器尚不支持独立会话。请先成功保存，再从 R2 恢复到新版镜像；未改动当前会话。');
+      if(body.action==='delete'&&!status.sessionDeletionSupported)throw Error('当前镜像不支持删除会话，请先切换新版镜像。');
       const r=await this.bridge('/sessions',body), data=await r.json();
       if(!r.ok)throw Error(data.error||'切换会话失败');
+      if(body.action==='delete'){const keys=(data.deletedTaskIds||[]).filter(id=>typeof id==='string').map(id=>'request:'+id);for(let i=0;i<keys.length;i+=128)await this.ctx.storage.delete(keys.slice(i,i+128));}
       const latest=await (await this.bridge('/status')).json();
       await this.ctx.storage.put({lastTask:latest.task||null,lastActivity:Date.now()});
       await this.ctx.storage.delete(['responseTiming','lastGatewayError']);this.live=null;
