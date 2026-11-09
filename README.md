@@ -178,3 +178,6 @@ completed 不是仅看 SDK 是否抛异常：max-tokens/length 或没有最终�
 控制台新增“新建会话”和会话选择器，保持原有侧栏、预览、聊天证据、快照与 R2 布局。新会话使用随机 UUID，独立 DSH 模型上下文，但共享 /data/workspace 文件；不会删除旧对话或文件，不自动压缩或重放任务。旧 state.json 自动登记原会话，原有未标记的任务归入原会话；完整历史仍保存在同一 state.json，当前历史视图只展示所选会话。注册表与所有 DSH 会话目录随 /data 一起备份/恢复。
 创建/切换只在空闲时允许，通过同一 DO 排队和 Bridge busy 锁协调；提交携带预期 sessionId，跨页面切换后过期提交拒绝。切换关闭并刷盘旧 Harness，再选新上下文；已有会话必须 resumeSession，失败不另建替代。全新上下文用官方 getWorkingDirectory 物化并保存后才标为可恢复，尚不调用模型。首次任务作为会话标题；不支持删除会话。仅查看状态/历史不唤醒容器，显式创建/切换会唤醒。
 Bridge 标识 sessions-browser-run-v1。旧容器没有 /sessions 时，Worker 不假装新建成功；需先成功保存，再显式从 R2 恢复新版镜像。没有实现自动升级或销毁旧环境。新会话不继承旧聊天，但仍有 DSH 系统提示和工具定义，不能承诺空白会话只有用户输入的 token。
+
+## Browser Run 失败定位
+浏览器先 acquire/launch 获取页面 targets，再 connectSession(sessionId,{targetId}) 显式连接 page target，必要时 devtools.newTarget。CDP 错误包含命令名称，报告记录 failedStage/failureKind。入口未加载时不继续跑 DOM 测试或拍空白截图。启动/连接/协议失败返回 retryable:false 与停止本轮自检的建议；新的网站提示词要求平台失败时不要通过 Bash 提权反复重试。此规则不是自动批准、取消或禁用工具权限；用户仍决定审批。DO lastBrowserCheck 和 Worker DSH_BROWSER_CHECK 保存精简失败诊断，不保存图片、Live View URL 或会话令牌。HTTP 200 仅指报告成功送达，不代表检查通过；passed 才是检查结果。未修改容器 egress 或 Browser Run allowlist。显式页面连接是兼容性修正，不能在真实 Browser Run 截图验收前宣称线上问题已解决。

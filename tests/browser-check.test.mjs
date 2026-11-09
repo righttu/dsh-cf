@@ -29,3 +29,19 @@ test('Agent client uses controlled endpoint and image no longer installs a brows
  assert.match(helper,/https:\/\/dsh-selfcheck.internal\/check/);assert.doesNotMatch(helper,/from 'playwright-core'|chromium.launch/);
  assert.doesNotMatch(docker,/install.*chromium/);assert.equal(config.browser.binding,'BROWSER');
 });
+
+test('explicitly connect a page target and report connection failures without screenshots',async()=>{
+ let closed=false,selected;
+ const binding={async launch(options){assert.equal(options.targets,true);return {sessionId:'browser-session',targets:[{id:'page-1',type:'page'}]}},async connectSession(id,options){assert.equal(id,'browser-session');selected=options.targetId;throw Error('connection unavailable')},async closeSession(){closed=true}};
+ const {report,images}=await checkWebsite(binding,{});
+ assert.equal(selected,'page-1');assert.equal(closed,true);assert.equal(report.failedStage,'connect-page');assert.equal(report.failureKind,'infrastructure');assert.equal(report.retryable,false);assert.equal(report.passed,false);assert.deepEqual(images,{});
+});
+test('create missing page target; failed navigation never runs site assertions or captures blank evidence',async()=>{
+ const socket=new EventTarget();const commands=[];
+ socket.accept=()=>{};socket.close=()=>socket.dispatchEvent(new Event('close'));
+ socket.send=text=>{const command=JSON.parse(text);commands.push(command.method);queueMicrotask(()=>{const e=new Event('message');e.data=JSON.stringify({id:command.id,result:command.method==='Page.navigate'?{errorText:'navigation rejected'}:{}});socket.dispatchEvent(e)})};
+ let created=false;
+ const binding={async launch(){return {sessionId:'s',targets:[]}},devtools:{async newTarget(){created=true;return {id:'new-page',type:'page'}}},async connectSession(id,options){assert.equal(options.targetId,'new-page');return {webSocket:{async fetch(){return {webSocket:socket}}}}},async closeSession(){}};
+ const {report}=await checkWebsite(binding,{});
+ assert.equal(created,true);assert.equal(report.failedStage,'navigate');assert.equal(report.failureKind,'navigation');assert.equal(report.passed,false);assert.deepEqual(report.screenshots,[]);assert.equal(commands.includes('Page.captureScreenshot'),false);assert.equal(commands.includes('Runtime.evaluate'),false);
+});

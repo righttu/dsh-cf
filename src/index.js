@@ -72,7 +72,12 @@ export class BrowserCheck extends WorkerEntrypoint {
     try{
       const config=await agent.previewStart({root:body.root});
       const site=this.ctx.exports.BrowserSite({props:{id:config.id,expiresAt:Date.now()+120000}});
-      return await checkWebsite(this.env.BROWSER,site);
+      const result=await checkWebsite(this.env.BROWSER,site);
+      const summary={at:result.report.finishedAt,passed:result.report.passed,failedStage:result.report.failedStage||null,failureKind:result.report.failureKind||null,screenshots:result.report.screenshots.length,
+        failures:result.report.checks.filter(c=>!c.passed).map(c=>({name:c.name,error:diagnosticText(c.error).replace(/https?:\/\/\S+/g,'[url]')})).slice(0,8)};
+      await agent.recordBrowserCheck(summary);
+      console.log('DSH_BROWSER_CHECK',JSON.stringify(summary));
+      return result;
     }finally{await agent.releaseSiteCheck(token)}
   }
 }
@@ -281,6 +286,9 @@ export class DshAgent extends DurableObject {
   async acquireSiteCheck() {
     return this.exclusive(async()=>{const now=Date.now(),lease=await this.ctx.storage.get('siteCheckLease');if(lease?.expiresAt>now)throw Error('网站自检正在执行，请勿并发调用');const token=crypto.randomUUID();await this.ctx.storage.put('siteCheckLease',{token,expiresAt:now+180000});return token});
   }
+  async recordBrowserCheck(summary) {
+    return this.exclusive(async()=>{const task=await this.ctx.storage.get('lastTask');await this.ctx.storage.put('lastBrowserCheck',{...summary,taskId:task?.id||null});});
+  }
   async releaseSiteCheck(token) {
     return this.exclusive(async()=>{const lease=await this.ctx.storage.get('siteCheckLease');if(lease?.token===token)await this.ctx.storage.delete('siteCheckLease')});
   }
@@ -324,7 +332,7 @@ export class DshAgent extends DurableObject {
       const lastActivity = await this.ctx.storage.get('lastActivity');
       const preview = await this.ctx.storage.get('previewConfig');
       const activePreview = this.ctx.container.running && preview?.expiresAt > Date.now() ? { ...preview, url: '/preview/' + preview.id + '/index.html' } : null;
-      return { ...info, preview: activePreview, live: this.live?.taskId === info.task?.id ? this.live : null, lastBoot: await this.ctx.storage.get('lastBoot') ?? null, responseTiming: await this.ctx.storage.get('responseTiming') ?? null, hasBackup, backupAt, idleShutdownAt: this.ctx.container.running && !info.busy && lastActivity ? lastActivity + 10 * MINUTE : null, running: this.ctx.container.running, checkpointAt: cp?.at ?? null, checkpointError: await this.ctx.storage.get('checkpointError') ?? null, lastGatewayError: await this.ctx.storage.get('lastGatewayError') ?? null, modelConfig: { model: this.env.AI_MODEL || null, gateway: this.env.AI_GATEWAY_ID || 'default' } };
+      return { ...info, lastBrowserCheck: await this.ctx.storage.get('lastBrowserCheck') ?? null, preview: activePreview, live: this.live?.taskId === info.task?.id ? this.live : null, lastBoot: await this.ctx.storage.get('lastBoot') ?? null, responseTiming: await this.ctx.storage.get('responseTiming') ?? null, hasBackup, backupAt, idleShutdownAt: this.ctx.container.running && !info.busy && lastActivity ? lastActivity + 10 * MINUTE : null, running: this.ctx.container.running, checkpointAt: cp?.at ?? null, checkpointError: await this.ctx.storage.get('checkpointError') ?? null, lastGatewayError: await this.ctx.storage.get('lastGatewayError') ?? null, modelConfig: { model: this.env.AI_MODEL || null, gateway: this.env.AI_GATEWAY_ID || 'default' } };
     });
   }
   async readHistory() {
