@@ -296,7 +296,16 @@ test('a stale page cannot submit into a different active session',async()=>{
 function versionFixture(options={}) {
  const f=fixture({running:true,revision:2,...options});
  f.c.images.v2='v2-image';f.info.runtimeVersion='v1';f.info.sessions=[];
- const start=f.c.start.bind(f.c);f.c.start=o=>{start(o);f.info.runtimeVersion=o.image==='v2-image'?'v2':'v1';f.info.nodeVersion=f.info.runtimeVersion==='v2'?'v24.0.0':undefined;};
+ // Snapshots preserve the source runtime; they do not carry an image start option.
+ const snapshots=new Map();let snapshotSequence=0;
+ const snapshot=f.c.snapshotContainer.bind(f.c);
+ f.c.snapshotContainer=async o=>{const saved={...await snapshot(o),id:'version-snapshot-'+(++snapshotSequence)};snapshots.set(saved.id,{runtimeVersion:f.info.runtimeVersion,nodeVersion:f.info.nodeVersion});return saved;};
+ const start=f.c.start.bind(f.c);f.c.start=o=>{
+  let runtime;
+  if(o.containerSnapshot){runtime=snapshots.get(o.containerSnapshot.id);assert.ok(runtime,'fixture must know the snapshot source runtime');}
+  else {const version=o.image==='v2-image'?'v2':'v1';runtime={runtimeVersion:version,nodeVersion:version==='v2'?'v24.0.0':undefined};}
+  start(o);Object.assign(f.info,runtime);
+ };
  return f;
 }
 test('version switching rejects busy tasks before saving or destroying',async()=>{
@@ -376,7 +385,27 @@ test('resize rejects busy tasks and disk shrinking without stopping',async()=>{
 test('custom size survives snapshot restart and version switches',async()=>{
  const f=versionFixture(),size={vcpu:2,memoryMib:6144,diskMb:16000};await f.g.changeInstance({instance:size,confirm:true});
  f.events.length=0;await f.g.changeVersion({version:'v2',confirm:true});assert.deepEqual(f.events.find(e=>Array.isArray(e)&&e[0]==='start')[1].instance,size);
- f.events.length=0;await f.g.restart({confirm:true,checkpointAt:f.data.get('checkpoint').at});assert.deepEqual(f.events.find(e=>Array.isArray(e)&&e[0]==='start')[1].instance,size);
+ const cp=f.data.get('checkpoint');f.events.length=0;await f.g.restart({confirm:true,checkpointAt:cp.at});
+ const restoredStart=f.events.find(e=>Array.isArray(e)&&e[0]==='start')[1];
+ assert.deepEqual(restoredStart.instance,size);assert.equal(restoredStart.containerSnapshot.id,cp.snapshot.id);assert.equal(restoredStart.image,undefined);
+ assert.equal(f.info.runtimeVersion,'v2');assert.equal(f.info.nodeVersion,'v24.0.0');assert.deepEqual(f.data.get('activeInstance'),size);assert.equal(f.data.get('versionOperation'),null);
+ assert.ok(!f.events.includes('restore'));assert.ok(!f.events.includes('backup'));
+});
+test('snapshot restart preserves each version through repeated V2/V1 switching',async()=>{
+ const f=versionFixture();
+ for(const version of ['v2','v1','v2']){
+  await f.g.changeVersion({version,confirm:true});const cp=f.data.get('checkpoint');
+  await f.g.restart({confirm:true,checkpointAt:cp.at});
+  assert.equal(f.info.runtimeVersion,version);assert.equal(f.info.nodeVersion,version==='v2'?'v24.0.0':undefined);
+  assert.equal(f.data.get('versionOperation'),null);assert.equal(f.c.running,true);
+ }
+});
+test('restart still rejects an actual snapshot runtime version mismatch',async()=>{
+ const f=versionFixture();await f.g.changeVersion({version:'v2',confirm:true});const cp=f.data.get('checkpoint');
+ const start=f.c.start.bind(f.c);f.c.start=o=>{start(o);if(o.containerSnapshot)f.info.runtimeVersion='v1';};
+ await assert.rejects(f.g.restart({confirm:true,checkpointAt:cp.at}),/重启后的版本与快照不符/);
+ assert.equal(f.c.running,false);assert.ok(f.data.get('versionOperation'));assert.equal(f.data.get('checkpoint').snapshot.id,cp.snapshot.id);
+ await assert.rejects(f.g.ensure(),/尚未完成/);
 });
 test('failed resizing restores source size only after explicit safety recovery',async()=>{
  const f=versionFixture();f.c.failRestore=true;await assert.rejects(f.g.changeInstance({instance:'standard-2',confirm:true}));assert.equal(f.data.get('selectedInstance'),undefined);assert.equal(f.data.get('checkpoint').instance,'standard-1');
