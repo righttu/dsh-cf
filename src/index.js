@@ -2,8 +2,6 @@ import { DurableObject, WorkerEntrypoint } from 'cloudflare:workers';
 import { Lifecycle } from 'agents/lifecycle';
 import { DirectoryBackup } from '@cloudflare/sandbox';
 import { page } from './page.js';
-import { labPage } from './snapshot-lab.js';
-export { SnapshotLab } from './snapshot-lab.js';
 import { normalizeTask } from '../container/history.mjs';
 import { previewServer, previewHeaders } from './preview.js';
 import { observeChatStream, chatResponseMeta } from './model-stream.js';
@@ -536,6 +534,7 @@ export class DshAgent extends DurableObject {
     return this.exclusive(async () => {
       await this.assertVersionIdle();
       const c = this.ctx.container;
+      if (!c.running) throw Error('环境已停止，请先唤醒后再切换版本或规格。');
       const lease = await this.ctx.storage.get('siteCheckLease');
       if (lease?.expiresAt > Date.now()) throw Error('浏览器检查正在执行，请结束后再切换。');
       await this.ensure();
@@ -546,11 +545,6 @@ export class DshAgent extends DurableObject {
       const instance=resize?body.instance:validateInstance((await this.ctx.storage.get('selectedInstance'))||'standard-1');
       const active=(await this.ctx.storage.get('activeInstance'))||'standard-1';
       if (before.runtimeVersion === body.version && JSON.stringify(active)===JSON.stringify(instance)) return { changed: false };
-      if(resize) {
-        // Reject shrinking disks: avoids silently truncating an existing workspace/image.
-        const sizes={'lite':2000,'standard-1':8000,'standard-2':12000,'standard-3':16000,'standard-4':20000};
-        if((typeof instance==='string'?sizes[instance]:instance.diskMb)<(typeof active==='string'?sizes[active]:active.diskMb))throw Error('暂不支持缩小磁盘，请选择磁盘不小于当前规格的配置。');
-      }
       // saveAndStop refuses busy state again and commits fresh backup + safety checkpoint BEFORE destroy.
       await this.saveAndStop();
       const source = await this.ctx.storage.get('checkpoint');
@@ -616,7 +610,6 @@ export default {
     if (!identity?.email) return new Response('Email identity required', { status: 403 });
     const u = new URL(request.url);
     if (u.pathname === '/' && request.method === 'GET') return new Response(page, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer', 'content-security-policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self'; frame-src 'self'; base-uri 'none'; frame-ancestors 'none'" } });
-    if (u.pathname === '/snapshot-lab' && request.method === 'GET') return new Response(labPage, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-frame-options': 'DENY', 'content-security-policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'" } });
     // Preview documents have an opaque sandbox origin; only their read-only route accepts Origin:null.
     const preview = /^\/preview\/([a-f0-9-]{36})\/(.*)$/.exec(u.pathname);
     if (preview && request.method === 'GET') {
@@ -629,10 +622,7 @@ export default {
     const agent = env.DSH.getByName('owner');
     try {
       let response;
-      if (u.pathname === '/api/snapshot-lab' && request.method === 'GET') response = Response.json(await env.SNAPSHOT_LAB.getByName('isolated-disk-test').status());
-      else if (u.pathname === '/api/snapshot-lab/step' && request.method === 'POST') response = Response.json(await env.SNAPSHOT_LAB.getByName('isolated-disk-test').step());
-      else if (u.pathname === '/api/snapshot-lab/reset' && request.method === 'POST') response = Response.json(await env.SNAPSHOT_LAB.getByName('isolated-disk-test').reset());
-      else if (u.pathname === '/api/events' && request.method === 'GET') response = await agent.events(u.searchParams.get('taskId'));
+      if (u.pathname === '/api/events' && request.method === 'GET') response = await agent.events(u.searchParams.get('taskId'));
       else if (u.pathname === '/api/preview/open' && request.method === 'POST') {
         const text = await request.text();
         if (text.length > 2048) return new Response('Too large', { status: 413 });

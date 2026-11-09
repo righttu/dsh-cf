@@ -1,27 +1,23 @@
-# Snapshot 16 GB -> 8 GB isolated runtime experiment
+# Archived: snapshot restore from 16 GB to 8 GB
+
+The experiment UI, routes, SnapshotLab class, container configuration and binding were removed after the completed test. Do not restore them during routine console changes.
+
+## Observed result (user-supplied cloud runtime output, 2026-11-09)
+
+All four stages completed: fresh image at 8000 MB; same image at 16000 MB and snapshot creation; that snapshot restored at 16000 MB; the SAME snapshot restored at 8000 MB. CPU was fixed at 1 vCPU, memory 3072 MiB. No R2 directory restore was used. Test containers were stopped after each step.
+
+Both /data/snapshot-lab-marker.txt and /opt/snapshot-lab-marker.txt matched SHA-256 after both snapshot restores. In the final stage, statfs, df and lsblk all reported 8,000,000,000 bytes (the source reported 16,000,000,000). Root filesystem was Btrfs on /dev/vdb. Snapshot handle size was 5174 bytes; this must not be treated as total root filesystem usage or minimum restore capacity.
+
+This disproves a blanket rule that a 16 GB-origin snapshot cannot start on an actual 8 GB disk. It does not establish the platform's private snapshot implementation, arbitrary size-pair compatibility, full DSH context validation, or near-full-disk behavior. Only two small markers were explicitly hash-verified.
+
+## Current application choice
+
+Instance switching continues to use a fresh R2 backup of /data, a source safety snapshot, a newly started target image+instance, and directory restore. Shrinking the target disk is no longer blanket-prohibited. Insufficient capacity or startup/restore/validation failure leaves the source checkpoint available for explicit recovery; no automatic retry or task replay.
+
+Files outside /data are NOT migrated by this R2 path. A same V1/V2 label refers to its currently configured image, not an immutable historical image selected through the UI.
 
 Official sources:
 - https://developers.cloudflare.com/containers/guides/snapshots/
 - https://developers.cloudflare.com/containers/api/durable-object-container/#start
 
-The public contract exposes snapshot+instance but does not specify smaller-disk restore compatibility or disclose whether snapshots are block-level, layered, or file-level internally. Do not infer implementation from a successful restore.
-
-## Run after deployment
-
-Visit https://dsh.righttu.uk/snapshot-lab through the same Access login. Click Execute next step four times, waiting for each response. GET refresh is read-only. The existing console is unchanged. All write routes use the existing Access identity and same-Origin guards.
-
-The separate SnapshotLab Durable Object/container never addresses the DshAgent owner, AI, browser, or R2. It uses the DSH image with an overridden sleep entrypoint, no Internet, no model calls. Only its own container is stopped. Root markers live under /data and /opt. Each step ends with destroy; inactivity timeout is 120 seconds and the entrypoint exits after 600 seconds. Timed-out/interrupted or failed controls require explicit reset, never automatic replay.
-
-Fixed vcpu=1, memoryMib=3072. Disk values are MB: 8000 and 16000, not GiB.
-1. Fresh image -> 8000 MB; collect filesystem and block/mount evidence.
-2. Same immutable image -> 16000 MB; write two tiny markers, hash, measure, snapshot.
-3. That snapshot -> 16000 MB; verify both hashes, measure.
-4. SAME snapshot -> 8000 MB; verify both hashes, measure.
-
-Capture JSON for all steps. Calling start() without an exception is not a pass: exec and output must complete. Preserve synchronous and asynchronous startup errors. Compare filesystem.totalBytes, df, lsblk and mountinfo against both image baselines. A successful restore with unchanged 16 GB capacity does not establish effective disk shrinking. Container-visible filesystem evidence does not independently prove platform billing or provisioned backing capacity.
-
-This first experiment has tiny data. It does not validate snapshots with >8 GB of files, different filesystem features, every size pair, or a platform guarantee. Do not fill production disks for a follow-up. Snapshot handles expire per platform policy; reset retains the immediately previous record but does not delete snapshots (the Worker snapshot API provides no delete method). Active runtime and snapshot storage incur normal charges.
-
-## Status
-
-Prepared only. No real cloud execution result is recorded here. CI unit tests use test doubles and cannot establish runtime support.
+The public docs examined did not specify smaller-disk snapshot compatibility. Runtime success above is experimental evidence, not a universal official guarantee. Removing the experiment does not claim that stored platform snapshots were deleted; snapshot retention follows platform policy.

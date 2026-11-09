@@ -5,7 +5,7 @@ import { readFile } from 'node:fs/promises';
 // Exercise the actual control-plane source with platform interfaces replaced by
 // deterministic in-memory doubles. No Cloudflare account, network or model calls.
 const source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8');
-const stripped = source.replace(/^import .*;\n/gm, '').replace(/^export \{ (DirectoryBackupGateway|SnapshotLab) \} from .*;\n/gm, '');
+const stripped = source.replace(/^import .*;\n/gm, '').replace(/^export \{ DirectoryBackupGateway \} from .*;\n/gm, '');
 const prelude = `
 import { normalizeTask } from ${JSON.stringify(new URL('../container/history.mjs', import.meta.url).href)};
 const page = '';
@@ -378,9 +378,28 @@ test('resize backs up before stopping, preserves version, and commits selected s
  const start=f.events.find(e=>Array.isArray(e)&&e[0]==='start');assert.equal(start[1].instance,'standard-2');assert.equal(start[1].image,'current-image');
  assert.ok(f.events.indexOf('backup')<f.events.indexOf('destroy'));assert.equal(f.data.get('checkpoint').instance,'standard-2');assert.equal(f.data.get('activeInstance'),'standard-2');
 });
-test('resize rejects busy tasks and disk shrinking without stopping',async()=>{
+test('resize rejects busy tasks without stopping',async()=>{
  const f=versionFixture({busy:true});await assert.rejects(f.g.changeInstance({instance:'standard-2',confirm:true}),/任务/);assert.ok(!f.events.includes('destroy'));
- f.info.busy=false;await assert.rejects(f.g.changeInstance({instance:'lite',confirm:true}),/缩小磁盘/);assert.ok(!f.events.includes('destroy'));
+});
+test('stopped environment cannot silently wake to switch version or size',async()=>{
+ const f=versionFixture({running:false});
+ await assert.rejects(f.g.changeVersion({version:'v2',confirm:true}),/环境已停止/);
+ await assert.rejects(f.g.changeInstance({instance:'standard-2',confirm:true}),/环境已停止/);
+ assert.ok(!f.events.includes('backup'));assert.ok(!f.events.some(x=>Array.isArray(x)&&x[0]==='start'));
+});
+test('smaller disk switches through fresh R2 backup, not source snapshot',async()=>{
+ const f=versionFixture();await f.g.changeInstance({instance:'standard-3',confirm:true});f.events.length=0;
+ await f.g.changeInstance({instance:'standard-1',confirm:true});
+ const start=f.events.find(x=>Array.isArray(x)&&x[0]==='start')[1];assert.equal(start.instance,'standard-1');assert.equal(start.containerSnapshot,undefined);assert.equal(start.image,'current-image');
+ assert.ok(f.events.indexOf('backup')<f.events.indexOf('destroy'));assert.ok(f.events.indexOf('restore')>f.events.indexOf('destroy'));
+ assert.equal(f.data.get('checkpoint').instance,'standard-1');
+});
+test('insufficient restore space retains larger source checkpoint for explicit recovery',async()=>{
+ const f=versionFixture();await f.g.changeInstance({instance:'standard-3',confirm:true});const source=f.data.get('checkpoint');
+ const restore=f.g.backups.restore.bind(f.g.backups);f.g.backups.restore=async()=>{throw Error('ENOSPC')};
+ await assert.rejects(f.g.changeInstance({instance:'standard-1',confirm:true}),/ENOSPC/);
+ assert.equal(f.data.get('checkpoint').snapshot.id,source.snapshot.id);assert.equal(f.data.get('selectedInstance'),'standard-3');assert.equal(f.c.running,false);
+ f.g.backups.restore=restore;await f.g.restoreVersionSafety();assert.equal(f.data.get('activeInstance'),'standard-3');assert.equal(f.data.get('versionOperation'),null);
 });
 test('custom size survives snapshot restart and version switches',async()=>{
  const f=versionFixture(),size={vcpu:2,memoryMib:6144,diskMb:16000};await f.g.changeInstance({instance:size,confirm:true});
