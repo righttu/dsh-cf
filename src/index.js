@@ -21,29 +21,40 @@ export function taskPhaseFor(info,models,lease,now=Date.now()) {
   const phase=(kind,label,detail,since)=>({taskId:task.id,kind,label,detail,since:Number.isFinite(since)?since:null,observedAt:now});
   const pending=(info.approvals||[]).filter(a=>a.status==='pending'&&a.expiresAt>now&&(!a.taskId||a.taskId===task.id));
   if(pending.length)return phase('approval','等待你的授权','有工具操作等待本次授权，请核对并处理权限申请。',Math.min(...pending.map(a=>a.at).filter(Number.isFinite)));
-  if(lease?.taskId===task.id&&lease.expiresAt>now)return phase('browser','等待浏览器检查结果','正在准备或执行 Cloudflare Browser Run 检查与截图。',lease.startedAt);
+  if(lease?.taskId===task.id&&lease.expiresAt>now)return phase('browser',lease.waitingAt?'等待浏览器检查结果':'正在准备浏览器检查','Cloudflare Browser Run 检查与截图。',lease.waitingAt||lease.startedAt);
   const calls=models?.taskId===task.id?(models.calls||[]).filter(c=>c.startedAt>now-15*MINUTE):[];
   if(calls.length){const streaming=calls.filter(c=>c.responseStartedAt);return phase('model',streaming.length?'正在接收模型流':'等待模型响应','',Math.min(...(streaming.length?streaming.map(c=>c.responseStartedAt):calls.map(c=>c.startedAt))));}
   if(info.runtimeReady===false)return phase('preparing','正在准备 Agent','正在初始化或恢复 Agent 会话。',task.startedAt);
   return phase('executing','Agent 正在执行','正在执行或处理工具结果；当前没有已确认的外部等待事件。',null);
 }
-// Wall-clock phase sampling; never infer CPU idle time from these measurements.
-export function advanceTaskWait(previous,task,phase,now=Date.now()) {
-  if(!previous||previous.taskId!==task?.id)return null;
-  if(previous.finishedAt)return previous;
-  const end=task.status!=='running'&&Number.isFinite(task.finishedAt)?Math.min(now,task.finishedAt):now;
-  const next=structuredClone(previous),at=Math.max(previous.lastObservedAt,end),delta=at-previous.lastObservedAt;
-  const kinds=['model','browser','approval','other','unobserved'];
-  const key=delta>3000?'unobserved':kinds.includes(previous.phase)?previous.phase:'unobserved';
-  next.ms[key]=(next.ms[key]||0)+delta;next.lastObservedAt=at;
-  next.phase=phase&&['model','browser','approval'].includes(phase.kind)?phase.kind:'other';
-  if(task.status!=='running')next.finishedAt=at;
-  return next;
+// Only intervals with known boundaries; never classify streaming or local work as waiting.
+export function newKnownWait(taskId,startedAt){return {version:2,taskId,startedAt,open:{},closed:{model:[],browser:[],approval:[],stream:[]},endedAt:null,truncated:false}}
+function mergeWaitSpans(spans){const sorted=spans.filter(([a,b])=>Number.isFinite(a)&&Number.isFinite(b)&&b>a).sort((a,b)=>a[0]-b[0]),out=[];for(const span of sorted){const last=out.at(-1);if(last&&span[0]<=last[1])last[1]=Math.max(last[1],span[1]);else out.push([...span])}return out}
+export function applyKnownWait(previous,event){
+ if(previous?.version!==2||Number.isFinite(previous.endedAt)||event.taskId!==previous.taskId||!['model','browser','approval','stream'].includes(event.kind)||!Number.isFinite(event.at))return previous;
+ const s=structuredClone(previous),at=Math.max(s.startedAt,event.at);
+ if(event.action==='start'){if(Object.keys(s.open).length>=128){s.truncated=true;return s}if(!s.open[event.key])s.open[event.key]={kind:event.kind,at,deadline:event.deadline||at+900000};}
+ if(event.action==='stop'){const open=s.open[event.key];if(open){delete s.open[event.key];const spans=mergeWaitSpans([...s.closed[open.kind],[open.at,at]]);if(spans.length>512){s.truncated=true;if(open.kind==='stream')s.exclusionCutoff=Math.min(s.exclusionCutoff??Infinity,spans[512][0])}s.closed[open.kind]=spans.slice(0,512)}}
+ return s;
 }
-export function taskWaitView(stats) {
-  if(!stats)return null;const totalMs=Math.max(0,(stats.finishedAt||stats.lastObservedAt)-stats.startedAt),unobservedMs=stats.ms.unobserved||0;
-  const waitMs=(stats.ms.model||0)+(stats.ms.browser||0)+(stats.ms.approval||0),coverage=totalMs?Math.max(0,1-unobservedMs/totalMs):0;
-  return {taskId:stats.taskId,totalMs,waitMs,coverage,ratio:totalMs>0&&coverage>=0.9?Math.min(1,waitMs/totalMs):null,modelMs:stats.ms.model||0,browserMs:stats.ms.browser||0,approvalMs:stats.ms.approval||0,unobservedMs,estimated:true,finished:!!stats.finishedAt};
+export function captureKnownApprovals(previous,task,approvals,now=Date.now()){
+ if(previous?.version!==2||previous.taskId!==task?.id||previous.endedAt)return previous;
+ let s=previous;
+ for(const a of approvals||[]){if(a.taskId!==task.id||!Number.isFinite(a.at)||a.at>now||!Number.isFinite(a.expiresAt))continue;const key='approval:'+a.id;
+ s=applyKnownWait(s,{taskId:task.id,kind:'approval',key,action:'start',at:a.at,deadline:a.expiresAt});
+ const end=Number.isFinite(a.finishedAt)?Math.min(a.finishedAt,a.expiresAt,now):a.expiresAt<=now?a.expiresAt:null;
+ if(end!==null)s=applyKnownWait(s,{taskId:task.id,kind:'approval',key,action:'stop',at:end});
+ }
+ if(task.status!=='running'){s=structuredClone(s);s.endedAt=Math.max(s.startedAt,Number.isFinite(task.finishedAt)?Math.min(now,task.finishedAt):now);for(const key of Object.keys(s.open)){if(s.open[key].kind==='stream')s.closed.stream=mergeWaitSpans([...s.closed.stream,[s.open[key].at,s.endedAt]])}if(s.closed.stream.length>512){s.truncated=true;s.exclusionCutoff=Math.min(s.exclusionCutoff??Infinity,s.closed.stream[512][0]);s.closed.stream=s.closed.stream.slice(0,512)}s.open={};}
+ return s;
+}
+function subtractWaitSpans(spans,excluded){let out=spans;for(const [a,b] of excluded)out=out.flatMap(([x,y])=>b<=x||a>=y?[[x,y]]:[[x,Math.min(y,a)],[Math.max(x,b),y]].filter(([u,v])=>v>u));return out}
+export function knownWaitView(s,now=Date.now()){
+ if(s?.version!==2)return null;const end=Number.isFinite(s.endedAt)?s.endedAt:now,clip=spans=>mergeWaitSpans(spans.map(([a,b])=>[Math.max(s.startedAt,a),Math.min(end,b)]));const kinds={};
+ const streaming=clip([...(Number.isFinite(s.exclusionCutoff)?[[s.exclusionCutoff,end]]:[]),...s.closed.stream,...Object.values(s.open).filter(x=>x.kind==='stream').map(x=>[x.at,now])]);
+ for(const kind of ['model','browser','approval']){const active=Number.isFinite(s.endedAt)?[]:Object.values(s.open).filter(x=>x.kind===kind&&x.deadline>now).map(x=>[x.at,now]);kinds[kind]=subtractWaitSpans(clip([...s.closed[kind],...active]),streaming);}
+ const sum=a=>a.reduce((n,[start,end])=>n+end-start,0),waitMs=sum(mergeWaitSpans(Object.values(kinds).flat())),totalMs=Math.max(0,end-s.startedAt);
+ return {taskId:s.taskId,waitMs,totalMs,ratio:totalMs&&!s.truncated?Math.min(1,waitMs/totalMs):null,modelMs:sum(kinds.model),browserMs:sum(kinds.browser),approvalMs:sum(kinds.approval),finished:Number.isFinite(s.endedAt),knownOnly:true,truncated:s.truncated};
 }
 function diagnosticText(value) {
   return String(value ?? 'Unknown error').replace(/Bearer\s+[^\s"\\]+/gi, 'Bearer [redacted]').replace(/\bsk-[A-Za-z0-9_-]+/g, '[redacted]').slice(0, 1600);
@@ -111,7 +122,8 @@ export class BrowserCheck extends WorkerEntrypoint {
     try{
       const config=await agent.previewStart({root:body.root});
       const site=this.ctx.exports.BrowserSite({props:{id:config.id,expiresAt:Date.now()+120000}});
-      const result=await checkWebsite(this.env.BROWSER,site);
+      await agent.beginBrowserWait(token);
+      let result;try{result=await checkWebsite(this.env.BROWSER,site)}finally{await agent.endBrowserWait(token)}
       const summary={at:result.report.finishedAt,passed:result.report.passed,failedStage:result.report.failedStage||null,failureKind:result.report.failureKind||null,screenshots:result.report.screenshots.length,
         failures:result.report.checks.filter(c=>!c.passed).map(c=>({name:c.name,error:diagnosticText(c.error).replace(/https?:\/\/\S+/g,'[url]')})).slice(0,8)};
       await agent.recordBrowserCheck(summary);
@@ -210,7 +222,7 @@ export class DshAgent extends DurableObject {
       if(body.demo==='web-deck-v1')await this.prepareDemoFiles(status);
       // Record intent before crossing the process boundary. An ambiguous response must not replay work.
       const intent = { id: body.id, status: 'submission-unknown', startedAt: Date.now() };
-      await this.ctx.storage.put({ ['request:' + body.id]: intent, lastActivity: Date.now(), taskTimingStart: { id: body.id, acceptedAt: intent.startedAt }, taskWaitMetrics:{taskId:body.id,startedAt:intent.startedAt,lastObservedAt:intent.startedAt,phase:'unobserved',ms:{model:0,browser:0,approval:0,other:0,unobserved:0}} });
+      await this.ctx.storage.put({ ['request:' + body.id]: intent, lastActivity: Date.now(), taskTimingStart: { id: body.id, acceptedAt: intent.startedAt }, taskWaitMetrics:newKnownWait(body.id,intent.startedAt) });
       const r = await this.bridge('/tasks', body); const task = await r.json();
       if (r.ok) { this.live = null; await this.ctx.storage.put({ ['request:' + body.id]: task, lastTask: task }); }
       return Response.json(task, { status: r.status });
@@ -298,6 +310,7 @@ export class DshAgent extends DurableObject {
       if(models?.taskId!==call.taskId)this.modelPhaseSeen=new Set();
       const calls=models?.taskId===call.taskId?(models.calls||[]).filter(c=>c.startedAt>Date.now()-15*MINUTE):[];
       if(call.taskId)await this.ctx.storage.put('modelActivity',{taskId:call.taskId,calls:[...calls,{callId:call.callId,startedAt:call.startedAt}].slice(-32)});
+      await this.updateKnownWait({taskId:call.taskId,kind:'model',key:'model:'+call.callId,action:'start',at:call.startedAt,deadline:call.startedAt+15*MINUTE});
       this.live = { ...call, ...timing, text: '', done: false };
       this.publishLive();
       return call;
@@ -307,7 +320,7 @@ export class DshAgent extends DurableObject {
     this.modelPhaseSeen??=new Set();
     if(update.done||((update.responseStarted||update.text)&&!this.modelPhaseSeen.has(update.callId))){
       this.modelPhaseSeen.add(update.callId);
-      await this.exclusive(async()=>{const models=await this.ctx.storage.get('modelActivity');if(models?.taskId!==update.taskId)return;const found=models.calls?.find(c=>c.callId===update.callId);if(!found)return;if(update.done)models.calls=models.calls.filter(c=>c.callId!==update.callId);else found.responseStartedAt=Date.now();await this.ctx.storage.put('modelActivity',models)});
+      await this.exclusive(async()=>{const models=await this.ctx.storage.get('modelActivity');if(models?.taskId!==update.taskId)return;const found=models.calls?.find(c=>c.callId===update.callId);if(!found)return;if(update.done)models.calls=models.calls.filter(c=>c.callId!==update.callId);else found.responseStartedAt=Date.now();await this.ctx.storage.put('modelActivity',models);await this.updateKnownWait({taskId:update.taskId,kind:'model',key:'model:'+update.callId,action:'stop',at:Date.now()});await this.updateKnownWait({taskId:update.taskId,kind:'stream',key:'stream:'+update.callId,action:update.done?'stop':'start',at:Date.now()})});
       if(update.done)this.modelPhaseSeen.delete(update.callId);
     }
     if (!this.live || update.callId !== this.live.callId || update.taskId !== this.live.taskId) return;
@@ -347,6 +360,10 @@ export class DshAgent extends DurableObject {
     await this.lifecycle.start();
     await this.ctx.storage.put('lastGatewayError', { at: Number(failure.at), stage: diagnosticText(failure.stage), model: diagnosticText(failure.model), gateway: diagnosticText(failure.gateway), message: diagnosticText(failure.message), code: failure.code == null ? null : diagnosticText(failure.code), status: Number.isInteger(failure.status) ? failure.status : null });
   }
+  // Caller already holds the operation queue; avoid recursively acquiring it.
+  async updateKnownWait(event){const previous=await this.ctx.storage.get('taskWaitMetrics'),next=applyKnownWait(previous,event);if(next!==previous)await this.ctx.storage.put('taskWaitMetrics',next)}
+  async beginBrowserWait(token){return this.exclusive(async()=>{const lease=await this.ctx.storage.get('siteCheckLease');if(lease?.token!==token||lease.expiresAt<=Date.now())throw Error('浏览器检查授权已失效');lease.waitingAt=Date.now();await this.ctx.storage.put('siteCheckLease',lease);await this.updateKnownWait({taskId:lease.taskId,kind:'browser',key:'browser:'+token,action:'start',at:lease.waitingAt,deadline:lease.expiresAt})})}
+  async endBrowserWait(token){return this.exclusive(async()=>{const lease=await this.ctx.storage.get('siteCheckLease');if(lease?.token===token)await this.updateKnownWait({taskId:lease.taskId,kind:'browser',key:'browser:'+token,action:'stop',at:Date.now()})})}
   async acquireSiteCheck() {
     return this.exclusive(async()=>{const now=Date.now(),lease=await this.ctx.storage.get('siteCheckLease');if(lease?.expiresAt>now)throw Error('网站自检正在执行，请勿并发调用');const token=crypto.randomUUID();const task=await this.ctx.storage.get('lastTask');await this.ctx.storage.put('siteCheckLease',{token,taskId:task?.id||null,startedAt:now,expiresAt:now+180000});return token});
   }
@@ -354,7 +371,7 @@ export class DshAgent extends DurableObject {
     return this.exclusive(async()=>{const task=await this.ctx.storage.get('lastTask');await this.ctx.storage.put('lastBrowserCheck',{...summary,taskId:task?.id||null});});
   }
   async releaseSiteCheck(token) {
-    return this.exclusive(async()=>{const lease=await this.ctx.storage.get('siteCheckLease');if(lease?.token===token)await this.ctx.storage.delete('siteCheckLease')});
+    return this.exclusive(async()=>{const lease=await this.ctx.storage.get('siteCheckLease');if(lease?.token===token){await this.updateKnownWait({taskId:lease.taskId,kind:'browser',key:'browser:'+token,action:'stop',at:Date.now()});await this.ctx.storage.delete('siteCheckLease')}});
   }
   async decideApproval(body) {
     if(!body || typeof body.id!=='string' || !['allowed-once','rejected'].includes(body.outcome))throw Error('无效权限答复');
@@ -400,9 +417,9 @@ export class DshAgent extends DurableObject {
       const activePreview = this.ctx.container.running && preview?.expiresAt > Date.now() ? { ...preview, url: '/preview/' + preview.id + '/index.html' } : null;
       const taskPhase=this.ctx.container.running?taskPhaseFor(info,await this.ctx.storage.get('modelActivity'),await this.ctx.storage.get('siteCheckLease')):null;
       const previousWait=await this.ctx.storage.get('taskWaitMetrics');
-      const waitStats=advanceTaskWait(previousWait,info.task,taskPhase);
-      if(waitStats&&!previousWait?.finishedAt)await this.ctx.storage.put('taskWaitMetrics',waitStats);
-      return { ...info, taskPhase, taskWait:taskWaitView(waitStats), environmentProgress: await this.ctx.storage.get('environmentProgress') || null, instance: {current: this.ctx.container.running ? (await this.ctx.storage.get('activeInstance')) || 'standard-1' : cp?.instance || 'standard-1', source: this.ctx.container.running ? 'startup-config' : 'checkpoint'}, versions: await this.versions(info), lastBrowserCheck: await this.ctx.storage.get('lastBrowserCheck') ?? null, preview: activePreview, live: this.live?.taskId === info.task?.id ? this.live : null, lastBoot: await this.ctx.storage.get('lastBoot') ?? null, responseTiming: await this.ctx.storage.get('responseTiming') ?? null, hasBackup, backupAt, idleShutdownAt: this.ctx.container.running && !info.busy && lastActivity ? lastActivity + 10 * MINUTE : null, running: this.ctx.container.running, checkpointAt: cp?.at ?? null, checkpointError: await this.ctx.storage.get('checkpointError') ?? null, lastGatewayError: await this.ctx.storage.get('lastGatewayError') ?? null, modelConfig: { model: this.env.AI_MODEL || null, gateway: this.env.AI_GATEWAY_ID || 'default' } };
+      const waitStats=captureKnownApprovals(previousWait,info.task,info.approvals);
+      if(waitStats!==previousWait)await this.ctx.storage.put('taskWaitMetrics',waitStats);
+      return { ...info, taskPhase, taskWait:knownWaitView(waitStats), environmentProgress: await this.ctx.storage.get('environmentProgress') || null, instance: {current: this.ctx.container.running ? (await this.ctx.storage.get('activeInstance')) || 'standard-1' : cp?.instance || 'standard-1', source: this.ctx.container.running ? 'startup-config' : 'checkpoint'}, versions: await this.versions(info), lastBrowserCheck: await this.ctx.storage.get('lastBrowserCheck') ?? null, preview: activePreview, live: this.live?.taskId === info.task?.id ? this.live : null, lastBoot: await this.ctx.storage.get('lastBoot') ?? null, responseTiming: await this.ctx.storage.get('responseTiming') ?? null, hasBackup, backupAt, idleShutdownAt: this.ctx.container.running && !info.busy && lastActivity ? lastActivity + 10 * MINUTE : null, running: this.ctx.container.running, checkpointAt: cp?.at ?? null, checkpointError: await this.ctx.storage.get('checkpointError') ?? null, lastGatewayError: await this.ctx.storage.get('lastGatewayError') ?? null, modelConfig: { model: this.env.AI_MODEL || null, gateway: this.env.AI_GATEWAY_ID || 'default' } };
     });
   }
   async readHistory() {

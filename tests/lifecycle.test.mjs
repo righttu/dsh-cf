@@ -26,7 +26,7 @@ class DirectoryBackup {
   async restore() { await this.intercept(); this.c.events.push('restore'); if (this.c.failRestore) throw Error('restore failed'); }
 }
 `;
-const { DshAgent, validateInstance, taskPhaseFor, advanceTaskWait, taskWaitView } = await import('data:text/javascript;base64,' + Buffer.from(prelude + stripped).toString('base64'));
+const { DshAgent, validateInstance, taskPhaseFor, newKnownWait, applyKnownWait, captureKnownApprovals, knownWaitView } = await import('data:text/javascript;base64,' + Buffer.from(prelude + stripped).toString('base64'));
 function fixture({ running = false, busy = false, revision, backup } = {}) {
   const data = new Map();
   if (revision) data.set('networkRevision', revision);
@@ -516,12 +516,21 @@ test('browser waiting starts and ends with the scoped browser lease',async()=>{
 });
 
 
-test('sampled wait categories are exclusive and completed statistics freeze',()=>{
- const task={id:'ratio-task',status:'running'};let m={taskId:task.id,startedAt:0,lastObservedAt:0,phase:'other',ms:{model:0,browser:0,approval:0,other:0,unobserved:0}};
- m=advanceTaskWait(m,task,{kind:'model'},1000);m=advanceTaskWait(m,task,{kind:'browser'},2000);m=advanceTaskWait(m,task,{kind:'approval'},3000);m=advanceTaskWait(m,task,{kind:'executing'},4000);m=advanceTaskWait(m,{...task,status:'completed',finishedAt:5000},null,5500);
- const v=taskWaitView(m);assert.equal(v.totalMs,5000);assert.equal(v.waitMs,3000);assert.equal(v.ratio,0.6);assert.equal(v.coverage,1);assert.equal(v.modelMs+v.browserMs+v.approvalMs,v.waitMs);assert.equal(v.finished,true);assert.deepEqual(advanceTaskWait(m,{...task,status:'completed'},null,9000),m);assert.equal(advanceTaskWait(m,{id:'other-task'},null,9000),null);
+test('known wait counts first-response delay only; overlapping streaming is excluded',()=>{
+ let s=newKnownWait('t',1000);const event=(key,kind,action,at)=>{s=applyKnownWait(s,{taskId:'t',key,kind,action,at,deadline:900000})};
+ event('a','model','start',1000);event('b','model','start',2000);event('a','model','stop',3000);event('sa','stream','start',3000);
+ assert.equal(knownWaitView(s,6000).waitMs,2000);event('sa','stream','stop',7000);event('b','model','stop',8000);event('br','browser','start',7000);event('br','browser','stop',9000);
+ s=captureKnownApprovals(s,{id:'t',status:'completed',finishedAt:11000},[{id:'p',taskId:'t',at:8000,expiresAt:20000,status:'allowed-once',finishedAt:10000}],12000);
+ const v=knownWaitView(s,50000);assert.equal(v.totalMs,10000);assert.equal(v.modelMs,3000);assert.equal(v.browserMs,2000);assert.equal(v.approvalMs,2000);assert.equal(v.waitMs,5000);assert.equal(v.ratio,0.5);assert.equal(v.finished,true);
+ assert.equal(captureKnownApprovals(s,{id:'t',status:'completed'},[],60000),s);assert.equal(applyKnownWait(s,{taskId:'other',kind:'model',at:12000}),s);
 });
-test('gaps are unobserved rather than guessed waiting, legacy tasks show no invented ratio',()=>{
- const task={id:'gap-task',status:'running'},m={taskId:task.id,startedAt:0,lastObservedAt:0,phase:'model',ms:{model:0,browser:0,approval:0,other:0,unobserved:0}};
- const gap=advanceTaskWait(m,task,{kind:'model'},10000),v=taskWaitView(gap);assert.equal(v.unobservedMs,10000);assert.equal(v.waitMs,0);assert.equal(v.ratio,null);assert.equal(advanceTaskWait(null,task,null,1000),null);assert.equal(taskWaitView(null),null);const bounded=advanceTaskWait(m,{...task,status:'completed',finishedAt:-1000},null,2000);assert.equal(taskWaitView(bounded).totalMs,0);
+test('known interval boundaries survive polling gaps; old sampled records and expired orphan calls are not guessed',()=>{
+ let s=newKnownWait('t',1000);s=applyKnownWait(s,{taskId:'t',key:'m',kind:'model',action:'start',at:2000,deadline:10000});assert.equal(knownWaitView(s,9000).waitMs,7000);assert.equal(knownWaitView(s,11000).waitMs,0);
+ s=applyKnownWait(s,{taskId:'t',key:'m',kind:'model',action:'stop',at:12000});assert.equal(knownWaitView(s,50000).waitMs,10000);assert.equal(knownWaitView({taskId:'old',ms:{model:9000}}),null);assert.equal(knownWaitView(null),null);
+ const a={id:'p',taskId:'t',at:2000,expiresAt:5000,status:'pending'};s=captureKnownApprovals(s,{id:'t',status:'running'},[a],9000);s=captureKnownApprovals(s,{id:'t',status:'running'},[a],15000);assert.equal(knownWaitView(s,15000).approvalMs,3000);
+});
+test('model and browser accounting records real boundaries independent of status polling',async()=>{
+ const f=fixture({running:true,revision:2});f.info.task={id:'known',status:'running'};f.data.set('lastTask',f.info.task);f.data.set('taskWaitMetrics',newKnownWait('known',Date.now()-1000));
+ const a=await f.g.beginModelCall();assert.ok(f.data.get('taskWaitMetrics').open['model:'+a.callId]);await f.g.modelProgress({...a,responseStarted:true,text:'',done:false});assert.equal(f.data.get('taskWaitMetrics').open['model:'+a.callId],undefined);assert.ok(f.data.get('taskWaitMetrics').open['stream:'+a.callId]);await f.g.modelProgress({...a,text:'',done:true});assert.equal(f.data.get('taskWaitMetrics').open['stream:'+a.callId],undefined);
+ const token=await f.g.acquireSiteCheck();assert.equal(Object.keys(f.data.get('taskWaitMetrics').open).length,0);await f.g.beginBrowserWait(token);assert.ok(f.data.get('taskWaitMetrics').open['browser:'+token]);await f.g.endBrowserWait(token);assert.equal(Object.keys(f.data.get('taskWaitMetrics').open).length,0);await f.g.releaseSiteCheck(token);
 });
