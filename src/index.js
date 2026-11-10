@@ -15,6 +15,18 @@ export function validateInstance(value) {
   return {vcpu,memoryMib,diskMb};
 }
 const MINUTE = 60000;
+// Observed execution phase, NOT CPU telemetry or a billing estimate.
+export function taskPhaseFor(info,models,lease,now=Date.now()) {
+  const task=info.task;if(task?.status!=='running')return null;
+  const phase=(kind,label,detail,since)=>({taskId:task.id,kind,label,detail,since:Number.isFinite(since)?since:null,observedAt:now});
+  const pending=(info.approvals||[]).filter(a=>a.status==='pending'&&a.expiresAt>now&&(!a.taskId||a.taskId===task.id));
+  if(pending.length)return phase('approval','等待你的授权','有工具操作等待本次授权，请核对并处理权限申请。',Math.min(...pending.map(a=>a.at).filter(Number.isFinite)));
+  if(lease?.taskId===task.id&&lease.expiresAt>now)return phase('browser','等待浏览器检查结果','正在准备或执行 Cloudflare Browser Run 检查与截图。',lease.startedAt);
+  const calls=models?.taskId===task.id?(models.calls||[]).filter(c=>c.startedAt>now-15*MINUTE):[];
+  if(calls.length)return phase('model',calls.some(c=>c.responseStartedAt)?'正在接收模型响应':'等待模型响应','模型请求正在外部服务处理中；此状态不代表容器 CPU 用量为零。',Math.min(...calls.map(c=>c.startedAt)));
+  if(info.runtimeReady===false)return phase('preparing','正在准备 Agent','正在初始化或恢复 Agent 会话。',task.startedAt);
+  return phase('executing','Agent 正在执行','正在执行或处理工具结果；当前没有已确认的外部等待事件。',null);
+}
 function diagnosticText(value) {
   return String(value ?? 'Unknown error').replace(/Bearer\s+[^\s"\\]+/gi, 'Bearer [redacted]').replace(/\bsk-[A-Za-z0-9_-]+/g, '[redacted]').slice(0, 1600);
 }
@@ -28,14 +40,14 @@ export class Outbound extends WorkerEntrypoint {
     }
     // This hostname is virtual: never forward container credentials or requests to OpenAI.
     if (u.protocol !== 'https:' || u.hostname !== 'api.openai.com' || u.pathname !== '/v1/chat/completions' || request.method !== 'POST') return new Response('Destination denied', { status: 403 });
-    let stage = 'parse-request';
+    let stage = 'parse-request', call = null;
     try {
       const input = await request.json();
       delete input.model;
       const model = this.env.AI_MODEL;
       stage = 'ai-binding';
       const agent = this.env.DSH.getByName('owner');
-      const call = await agent.beginModelCall().catch(() => null);
+      call = await agent.beginModelCall().catch(() => null);
       console.log('DSH_MODEL_REQUEST_META',JSON.stringify({taskId:call?.taskId||null,sessionId:call?.sessionId||null,callIndex:call?.callIndex||null,...chatRequestMeta(input)}));
       if (!model || model.startsWith('@cf/')) throw new Error('Configure AI_MODEL as a Gateway catalog model or dynamic route (OpenAI chat format).');
       const output = await this.env.AI.run(model, input, { gateway: { id: this.env.AI_GATEWAY_ID || 'default', skipCache: true } });
@@ -47,6 +59,7 @@ export class Outbound extends WorkerEntrypoint {
         if (output.headers.get('content-type')?.includes('application/json')) {
           try { reportMeta(chatResponseMeta(await output.clone().json())); } catch {}
         }
+        await report({text:'',done:true}).catch(()=>{});
         return output;
       }
       if (output instanceof ReadableStream) return new Response(observeChatStream(output, report, reportMeta), { headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-store' } });
@@ -55,6 +68,7 @@ export class Outbound extends WorkerEntrypoint {
       await report({ text: typeof text === 'string' ? text : '', done: true }).catch(() => {});
       return Response.json(output);
     } catch (e) {
+      if(call)try{await this.env.DSH.getByName('owner').modelProgress({...call,text:'',done:true})}catch{}
       const failure = { at: Date.now(), stage, model: String(this.env.AI_MODEL || ''), gateway: String(this.env.AI_GATEWAY_ID || 'default'), message: diagnosticText(e?.message || e), code: e?.code == null ? null : diagnosticText(e.code), status: Number.isInteger(e?.status) ? e.status : null };
       // Never log request headers, prompt, tools or the complete error object.
       console.error('DSH_GATEWAY_FAILURE', JSON.stringify(failure));
@@ -262,12 +276,22 @@ export class DshAgent extends DurableObject {
       if (previous?.taskId !== call.taskId) console.log('DSH_PREMODEL_BREAKDOWN', JSON.stringify({ taskId: task?.id, dispatchDelayMs: timing.dispatchDelayMs, runtime, runToModelMs: timing.runToModelMs }));
       call.callIndex=(timing.modelCalls||0)+1;timing.modelCalls=call.callIndex;
       await this.ctx.storage.put('responseTiming', timing);
+      const models=await this.ctx.storage.get('modelActivity');
+      if(models?.taskId!==call.taskId)this.modelPhaseSeen=new Set();
+      const calls=models?.taskId===call.taskId?(models.calls||[]).filter(c=>c.startedAt>Date.now()-15*MINUTE):[];
+      if(call.taskId)await this.ctx.storage.put('modelActivity',{taskId:call.taskId,calls:[...calls,{callId:call.callId,startedAt:call.startedAt}].slice(-32)});
       this.live = { ...call, ...timing, text: '', done: false };
       this.publishLive();
       return call;
     });
   }
   async modelProgress(update) {
+    this.modelPhaseSeen??=new Set();
+    if(update.done||(update.text&&!this.modelPhaseSeen.has(update.callId))){
+      this.modelPhaseSeen.add(update.callId);
+      await this.exclusive(async()=>{const models=await this.ctx.storage.get('modelActivity');if(models?.taskId!==update.taskId)return;const found=models.calls?.find(c=>c.callId===update.callId);if(!found)return;if(update.done)models.calls=models.calls.filter(c=>c.callId!==update.callId);else found.responseStartedAt=Date.now();await this.ctx.storage.put('modelActivity',models)});
+      if(update.done)this.modelPhaseSeen.delete(update.callId);
+    }
     if (!this.live || update.callId !== this.live.callId || update.taskId !== this.live.taskId) return;
     this.live.text = String(update.text || '').slice(0, 160000);
     this.live.done = !!update.done;
@@ -306,7 +330,7 @@ export class DshAgent extends DurableObject {
     await this.ctx.storage.put('lastGatewayError', { at: Number(failure.at), stage: diagnosticText(failure.stage), model: diagnosticText(failure.model), gateway: diagnosticText(failure.gateway), message: diagnosticText(failure.message), code: failure.code == null ? null : diagnosticText(failure.code), status: Number.isInteger(failure.status) ? failure.status : null });
   }
   async acquireSiteCheck() {
-    return this.exclusive(async()=>{const now=Date.now(),lease=await this.ctx.storage.get('siteCheckLease');if(lease?.expiresAt>now)throw Error('网站自检正在执行，请勿并发调用');const token=crypto.randomUUID();await this.ctx.storage.put('siteCheckLease',{token,expiresAt:now+180000});return token});
+    return this.exclusive(async()=>{const now=Date.now(),lease=await this.ctx.storage.get('siteCheckLease');if(lease?.expiresAt>now)throw Error('网站自检正在执行，请勿并发调用');const token=crypto.randomUUID();const task=await this.ctx.storage.get('lastTask');await this.ctx.storage.put('siteCheckLease',{token,taskId:task?.id||null,startedAt:now,expiresAt:now+180000});return token});
   }
   async recordBrowserCheck(summary) {
     return this.exclusive(async()=>{const task=await this.ctx.storage.get('lastTask');await this.ctx.storage.put('lastBrowserCheck',{...summary,taskId:task?.id||null});});
@@ -356,7 +380,7 @@ export class DshAgent extends DurableObject {
       const lastActivity = await this.ctx.storage.get('lastActivity');
       const preview = await this.ctx.storage.get('previewConfig');
       const activePreview = this.ctx.container.running && preview?.expiresAt > Date.now() ? { ...preview, url: '/preview/' + preview.id + '/index.html' } : null;
-      return { ...info, environmentProgress: await this.ctx.storage.get('environmentProgress') || null, instance: {current: this.ctx.container.running ? (await this.ctx.storage.get('activeInstance')) || 'standard-1' : cp?.instance || 'standard-1', source: this.ctx.container.running ? 'startup-config' : 'checkpoint'}, versions: await this.versions(info), lastBrowserCheck: await this.ctx.storage.get('lastBrowserCheck') ?? null, preview: activePreview, live: this.live?.taskId === info.task?.id ? this.live : null, lastBoot: await this.ctx.storage.get('lastBoot') ?? null, responseTiming: await this.ctx.storage.get('responseTiming') ?? null, hasBackup, backupAt, idleShutdownAt: this.ctx.container.running && !info.busy && lastActivity ? lastActivity + 10 * MINUTE : null, running: this.ctx.container.running, checkpointAt: cp?.at ?? null, checkpointError: await this.ctx.storage.get('checkpointError') ?? null, lastGatewayError: await this.ctx.storage.get('lastGatewayError') ?? null, modelConfig: { model: this.env.AI_MODEL || null, gateway: this.env.AI_GATEWAY_ID || 'default' } };
+      return { ...info, taskPhase: this.ctx.container.running?taskPhaseFor(info,await this.ctx.storage.get('modelActivity'),await this.ctx.storage.get('siteCheckLease')):null, environmentProgress: await this.ctx.storage.get('environmentProgress') || null, instance: {current: this.ctx.container.running ? (await this.ctx.storage.get('activeInstance')) || 'standard-1' : cp?.instance || 'standard-1', source: this.ctx.container.running ? 'startup-config' : 'checkpoint'}, versions: await this.versions(info), lastBrowserCheck: await this.ctx.storage.get('lastBrowserCheck') ?? null, preview: activePreview, live: this.live?.taskId === info.task?.id ? this.live : null, lastBoot: await this.ctx.storage.get('lastBoot') ?? null, responseTiming: await this.ctx.storage.get('responseTiming') ?? null, hasBackup, backupAt, idleShutdownAt: this.ctx.container.running && !info.busy && lastActivity ? lastActivity + 10 * MINUTE : null, running: this.ctx.container.running, checkpointAt: cp?.at ?? null, checkpointError: await this.ctx.storage.get('checkpointError') ?? null, lastGatewayError: await this.ctx.storage.get('lastGatewayError') ?? null, modelConfig: { model: this.env.AI_MODEL || null, gateway: this.env.AI_GATEWAY_ID || 'default' } };
     });
   }
   async readHistory() {
