@@ -53,3 +53,14 @@ test('request diagnostics contain counts and lengths, never history content',()=
  const input={stream:true,max_completion_tokens:32768,messages:[{role:'system',content:'private system'},{role:'user',content:'private user'},{role:'assistant',content:'answer',reasoning_content:'private reasoning',tool_calls:[{function:{arguments:'private arguments'}}]},{role:'tool',content:'private tool result'}],tools:[{function:{name:'private tool name'}}]};
  const meta=chatRequestMeta(input);assert.equal(meta.messageCount,4);assert.equal(meta.roles.user,1);assert.equal(meta.roles.tool,1);assert.equal(meta.toolCount,1);assert.equal(meta.reasoningChars,17);assert.equal(meta.max_completion_tokens,32768);assert.doesNotMatch(JSON.stringify(meta),/private|answer/);
 });
+
+
+test('reasoning-only first event starts stream status without leaking content or delaying first public text',async()=>{
+ let controller,startedNotify,publicNotify;const started=new Promise(r=>startedNotify=r),visible=new Promise(r=>publicNotify=r),updates=[];
+ const source=new ReadableStream({start(c){controller=c}}),reader=observeChatStream(source,u=>{updates.push(u);if(u.responseStarted&&!u.text)startedNotify(u);if(u.text)publicNotify(u)}).getReader();
+ controller.enqueue(encoder.encode(frame({reasoning_content:'private thinking'})));await reader.read();const event=await started;assert.equal(event.responseStarted,true);assert.equal(event.text,'');assert.equal(event.done,false);
+ controller.enqueue(encoder.encode(frame({content:'public'})));await reader.read();assert.equal((await visible).text,'public');controller.close();while(!(await reader.read()).done){}assert.doesNotMatch(JSON.stringify(updates),/private thinking/);assert.equal(updates.at(-1).done,true);
+});
+test('tool-only streams report protocol start without displaying tool arguments',async()=>{
+ const input=frame({tool_calls:[{function:{arguments:'private tool data'}}]});const updates=[];const source=new ReadableStream({start(c){c.enqueue(encoder.encode(input));c.close()}});assert.equal(await new Response(observeChatStream(source,u=>updates.push(u))).text(),input);assert.equal(updates[0].responseStarted,true);assert.equal(updates[0].done,false);assert.equal(updates[0].text,'');assert.doesNotMatch(JSON.stringify(updates),/private tool data/);
+});

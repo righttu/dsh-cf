@@ -17,16 +17,17 @@ export function chatResponseMeta(event) {
 export function observeChatStream(body, report, reportMeta = () => {}) {
   const decoder = new TextDecoder();
   const meta = { hasChoices: false, wrappedResult: false, frames: 0, finishReason: null, contentChars: 0, reasoningPresent: false, toolCallsPresent: false, errorPresent: false, usage: {} };
-  let buffer = '', text = '', lastSent = 0, first = true;
+  let buffer = '', text = '', lastSent = 0, first = true, responseStarted = false, publicSent = false;
   async function emit(done = false) {
-    if (!done && !first && Date.now() - lastSent < 120) return;
-    first = false; lastSent = Date.now();
-    try { await report({ text, done }); } catch { /* UI telemetry must not fail the model call. */ }
+    if (!done && !first && !(text && !publicSent) && Date.now() - lastSent < 120) return;
+    first = false; lastSent = Date.now(); publicSent ||= !!text;
+    try { await report({ text, done, responseStarted }); } catch { /* UI telemetry must not fail the model call. */ }
   }
   async function frame(frame) {
     const data = frame.split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n');
     if (!data || data === '[DONE]') return;
     let event; try { event = JSON.parse(data); } catch { return; }
+    const firstFrame = !responseStarted; responseStarted = true;
     const part = chatResponseMeta(event); meta.frames++; meta.hasChoices ||= part.hasChoices; meta.wrappedResult ||= part.wrappedResult;
     meta.finishReason = part.finishReason || meta.finishReason; meta.contentChars += part.contentChars;
     for (const key of ['reasoningPresent','toolCallsPresent','errorPresent']) meta[key] ||= part[key];
@@ -35,6 +36,9 @@ export function observeChatStream(body, report, reportMeta = () => {}) {
     const delta = choice?.delta?.content;
     if (typeof delta === 'string' && delta) {
       text = (text + delta).slice(0, 160000);
+      await emit();
+    } else if (firstFrame) {
+      // Signal the first protocol event without exposing private content.
       await emit();
     }
   }

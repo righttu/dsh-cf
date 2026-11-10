@@ -23,7 +23,7 @@ export function taskPhaseFor(info,models,lease,now=Date.now()) {
   if(pending.length)return phase('approval','等待你的授权','有工具操作等待本次授权，请核对并处理权限申请。',Math.min(...pending.map(a=>a.at).filter(Number.isFinite)));
   if(lease?.taskId===task.id&&lease.expiresAt>now)return phase('browser','等待浏览器检查结果','正在准备或执行 Cloudflare Browser Run 检查与截图。',lease.startedAt);
   const calls=models?.taskId===task.id?(models.calls||[]).filter(c=>c.startedAt>now-15*MINUTE):[];
-  if(calls.length)return phase('model','模型请求进行中','',Math.min(...calls.map(c=>c.startedAt)));
+  if(calls.length){const streaming=calls.filter(c=>c.responseStartedAt);return phase('model',streaming.length?'正在接收模型流':'等待模型响应','',Math.min(...(streaming.length?streaming.map(c=>c.responseStartedAt):calls.map(c=>c.startedAt))));}
   if(info.runtimeReady===false)return phase('preparing','正在准备 Agent','正在初始化或恢复 Agent 会话。',task.startedAt);
   return phase('executing','Agent 正在执行','正在执行或处理工具结果；当前没有已确认的外部等待事件。',null);
 }
@@ -305,7 +305,7 @@ export class DshAgent extends DurableObject {
   }
   async modelProgress(update) {
     this.modelPhaseSeen??=new Set();
-    if(update.done||(update.text&&!this.modelPhaseSeen.has(update.callId))){
+    if(update.done||((update.responseStarted||update.text)&&!this.modelPhaseSeen.has(update.callId))){
       this.modelPhaseSeen.add(update.callId);
       await this.exclusive(async()=>{const models=await this.ctx.storage.get('modelActivity');if(models?.taskId!==update.taskId)return;const found=models.calls?.find(c=>c.callId===update.callId);if(!found)return;if(update.done)models.calls=models.calls.filter(c=>c.callId!==update.callId);else found.responseStartedAt=Date.now();await this.ctx.storage.put('modelActivity',models)});
       if(update.done)this.modelPhaseSeen.delete(update.callId);
