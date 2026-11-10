@@ -8,6 +8,9 @@ COPY container/server.mjs ./server.mjs
 COPY container/approvals.mjs ./approvals.mjs
 COPY container/sessions.mjs ./sessions.mjs
 COPY container/site-check.mjs ./site-check.mjs
+COPY container/demo-environment.mjs ./demo-environment.mjs
+COPY container/demo-sales.csv ./demo-sales.csv
+RUN node --check /app/demo-environment.mjs
 COPY container/build-review-deck.mjs ./build-review-deck.mjs
 COPY container/deck-template.html ./deck-template.html
 RUN node --check /app/build-review-deck.mjs

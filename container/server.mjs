@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { prepareDemoEnvironment } from './demo-environment.mjs';
 import { initSessions, sessionView, selectSession } from './sessions.mjs';
 import { ApprovalQueue } from './approvals.mjs';
 import { timeStage } from './timing.mjs';
@@ -87,8 +88,12 @@ async function run(prompt) {
 const reply = (res, code, value) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(value)); };
 http.createServer(async (req, res) => {
   try {
-    if (req.method === 'GET' && req.url === '/status') return reply(res, 200, { ...runtimeIdentity(), sessionId: state.sessionId, task: state.task, busy, historySupported: true, bridgeVersion: 'sessions-browser-run-v1', ...sessionView(state), approvals: approvals.view(), runtimeReady: !!session, runElapsedMs: busy && activeRunClock !== null ? performance.now() - activeRunClock : null });
+    if (req.method === 'GET' && req.url === '/status') return reply(res, 200, { ...runtimeIdentity(), sessionId: state.sessionId, task: state.task, busy, historySupported: true, bridgeVersion: 'sessions-browser-run-v1', demoEnvironmentVersion: 1, ...sessionView(state), approvals: approvals.view(), runtimeReady: !!session, runElapsedMs: busy && activeRunClock !== null ? performance.now() - activeRunClock : null });
     if (req.method === 'GET' && req.url === '/history') return reply(res, 200, historyView(state));
+    if (req.method === 'POST' && req.url === '/demo/prepare') {
+      if(busy||approvals.view().some(a=>a.status==='pending'))return reply(res,409,{error:'任务或审批正在执行'});
+      busy=true;try{return reply(res,200,await prepareDemoEnvironment())}finally{busy=false}
+    }
     if (req.method === 'POST' && req.url === '/sessions') {
       let text=''; for await (const chunk of req) { text+=chunk; if(text.length>2048)return reply(res,413,{error:'Too large'}); }
       const body=JSON.parse(text);

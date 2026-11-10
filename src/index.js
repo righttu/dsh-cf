@@ -155,6 +155,16 @@ export class DshAgent extends DurableObject {
     if (bootMeasurement) { bootMeasurement.readyAt = Date.now(); bootMeasurement.serviceReadyMs = bootMeasurement.readyAt - bootMeasurement.startedAt; await this.ctx.storage.put('lastBoot', bootMeasurement); console.log('DSH_BOOT_TIMING', JSON.stringify(bootMeasurement)); }
     await this.lifecycle.jobs.push({ id: 'inspect', fn: 'inspect', time: Date.now() + MINUTE });
   }
+  async prepareDemoFiles(info) {
+    if(info.busy||info.approvals?.some(a=>a.status==='pending'))throw Error('任务或审批正在执行，请结束后再准备演示。');
+    if(info.demoEnvironmentVersion!==1)throw Error('运行环境尚未更新。请先点击“更新运行镜像”，确认保存并迁移后再准备演示。本次未调用模型。');
+    const r=await this.bridge('/demo/prepare',{}),result=await r.json();
+    if(!r.ok||result.ready!==true)throw Error(result.error||'演示环境准备未完成，本次未调用模型。');
+    await this.ctx.storage.put('lastActivity',Date.now());return result;
+  }
+  async prepareDemo() {
+    await this.lifecycle.start();return this.exclusive(async()=>{await this.ensure();return this.prepareDemoFiles(await (await this.bridge('/status')).json())});
+  }
   async submit(body) {
     await this.lifecycle.start();
     return this.exclusive(async () => {
@@ -165,6 +175,7 @@ export class DshAgent extends DurableObject {
       const status = await (await this.bridge('/status')).json();
       if(body.sessionId && body.sessionId!==status.sessionId)return Response.json({error:'当前会话已变化，请刷新后核对再提交'},{status:409});
       if (status.busy) return Response.json({ error: 'Another task is running' }, { status: 409 });
+      if(body.demo==='web-deck-v1')await this.prepareDemoFiles(status);
       // Record intent before crossing the process boundary. An ambiguous response must not replay work.
       const intent = { id: body.id, status: 'submission-unknown', startedAt: Date.now() };
       await this.ctx.storage.put({ ['request:' + body.id]: intent, lastActivity: Date.now(), taskTimingStart: { id: body.id, acceptedAt: intent.startedAt } });
@@ -558,7 +569,7 @@ export class DshAgent extends DurableObject {
       const image=c.images[body.version==='v1'?'dsh':'v2'];if(!image)throw Error('目标镜像尚未配置。');
       const instance=resize?body.instance:validateInstance((await this.ctx.storage.get('selectedInstance'))||'standard-1');
       const active=(await this.ctx.storage.get('activeInstance'))||'standard-1';
-      if (before.runtimeVersion === body.version && JSON.stringify(active)===JSON.stringify(instance)) return { changed: false };
+      if (before.runtimeVersion === body.version && JSON.stringify(active)===JSON.stringify(instance) && body.refreshImage!==true) return { changed: false };
       // saveAndStop refuses busy state again and commits fresh backup + safety checkpoint BEFORE destroy.
       await this.saveAndStop({onProgress:report});
       const source = await this.ctx.storage.get('checkpoint');
@@ -578,7 +589,7 @@ export class DshAgent extends DurableObject {
         await stage('validating');
         let info;
         for(let i=0;i<40;i++) { try { const r=await this.bridge('/status');if(r.ok){info=await r.json();break;} }catch{} await new Promise(r=>setTimeout(r,250)); }
-        if(info?.runtimeVersion !== body.version || (body.version === 'v2' && !/^v[0-9]+\./.test(info.nodeVersion || ''))) throw Error('目标容器版本或功能核验失败。');
+        if(info?.runtimeVersion !== body.version || (body.version === 'v2' && !/^v[0-9]+\./.test(info.nodeVersion || '')) || (body.refreshImage===true && info.demoEnvironmentVersion!==1)) throw Error('目标容器版本或功能核验失败。');
         const history = await this.readHistory();
         if(JSON.stringify(history.sessions || []) !== JSON.stringify((await this.ctx.storage.get('checkpointHistory'))?.sessions || [])) throw Error('恢复后的会话目录不一致。');
         const quiet = await this.bridge('/quiesce',{}); if(!quiet.ok) throw Error('恢复后的环境无法安全保存。');
@@ -648,6 +659,7 @@ export default {
       else if (u.pathname === '/api/versions/restore' && request.method === 'POST') response = Response.json(await agent.restoreVersionSafety());
       else if (u.pathname === '/api/instance' && request.method === 'POST') {const text=await request.text();if(text.length>2048)return new Response('Too large',{status:413});response=Response.json(await agent.changeInstance(JSON.parse(text)));}
       else if (u.pathname === '/api/versions' && request.method === 'POST') { const text=await request.text();if(text.length>2048)return new Response('Too large',{status:413});response=Response.json(await agent.changeVersion(JSON.parse(text))); }
+      else if (u.pathname === '/api/demo/prepare' && request.method === 'POST') response = Response.json(await agent.prepareDemo());
       else if (u.pathname === '/api/wake' && request.method === 'POST') response = Response.json(await agent.wake());
       else if (u.pathname === '/api/sessions' && request.method === 'POST') { const text=await request.text();if(text.length>2048)return new Response('Too large',{status:413});response=Response.json(await agent.changeSession(JSON.parse(text))); }
       else if (u.pathname === '/api/history' && request.method === 'GET') response = Response.json(await agent.history());

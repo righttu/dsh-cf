@@ -73,7 +73,7 @@ test('demo timings are inline in the topbar and detailed timing is collapsed',()
 
 test('approval action is orange and reachable while desktop slides never use a phone viewport',()=>{
  assert.match(page,/b.className=outcome==='allowed-once'\?'btn approval-allow':'btn'/);assert.match(page,/#approvals-panel \.approval-allow,#approval-jump\{background:var\(--orange\)/);assert.match(page,/待授权 /);assert.match(page,/scrollIntoView/);
- assert.match(page,/桌面宽屏 16:9（1280×720）/);assert.match(page,/不为本任务安装软件或下载依赖/);assert.match(page,/不把一次授权当成持续授权/);assert.match(page,/new ResizeObserver/);assert.match(page,/width:1280px!important;height:720px!important/);
+ assert.match(page,/桌面宽屏 16:9（1280×720）/);assert.match(page,/使用已安装的 Node 和本地资源/);assert.match(page,/不把一次授权当成持续授权/);assert.match(page,/new ResizeObserver/);assert.match(page,/width:1280px!important;height:720px!important/);
  assert.ok(page.includes("[['evidence-desktop','selfcheck-desktop.png']]"));assert.ok(!page.includes("['evidence-mobile','selfcheck-mobile.png']"));
 });
 
