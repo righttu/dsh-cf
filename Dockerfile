@@ -8,6 +8,9 @@ COPY container/server.mjs ./server.mjs
 COPY container/approvals.mjs ./approvals.mjs
 COPY container/sessions.mjs ./sessions.mjs
 COPY container/site-check.mjs ./site-check.mjs
+COPY container/build-review-deck.mjs ./build-review-deck.mjs
+COPY container/deck-template.html ./deck-template.html
+RUN node --check /app/build-review-deck.mjs
 COPY container/history.mjs ./history.mjs
 COPY container/timing.mjs ./timing.mjs
 COPY container/gateway.cordis.yml ./gateway.cordis.yml

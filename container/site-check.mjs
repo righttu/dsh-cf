@@ -1,11 +1,11 @@
 // Agent-run presentation check; real Chrome runs in Cloudflare Browser Run.
-// Presentation contract (five HTML slides in index.html):
+// Presentation contract (3 demo slides or 5 full HTML slides in index.html):
 // data-testid=slide on each slide; exactly one visible. Each slide has a heading.
-// Visible data-testid=slide-prev and slide-next buttons, slide-counter text "1 / 5".
+// Visible data-testid=slide-prev and slide-next buttons, slide-counter text "1 / N".
 // First slide: data-testid=total-revenue contains ONLY plain numeric total (commas OK).
 // sales.csv: simple unquoted CSV with headers month,region,revenue; nonnegative revenue.
 // report-data.json: {totalRevenue:number}, actually calculated from sales.csv by Node.
-// Five pages: summary, monthly trend, region comparison, risks, actions + data source.
+// Demo: summary, trends + regions, actions + source. Full: five pages with separate risks.
 // All resources local; real browser checks navigation, CSV totals, overflow and screenshots.
 // Invocation: node /app/site-check.mjs review-deck
 import path from 'node:path';
