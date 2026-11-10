@@ -10,7 +10,7 @@ test('console script parses and all literal element references exist',()=>{
 });
 test('both images use the same recipe with only the runtime version differing',async()=>{
  const c=JSON.parse(await readFile(new URL('../wrangler.jsonc',import.meta.url),'utf8'));
- const images=c.containers[0].images;assert.equal(images.dsh.dockerfile,images.v2.dockerfile);assert.equal(images.v2.build_vars.DSH_APP_VERSION,'v2');
+ const images=c.containers[0].images;assert.equal(images.dsh.dockerfile,images.v2.dockerfile);assert.equal(images.dsh.build_vars.DSH_APP_VERSION,'v1');assert.equal(images.v2.build_vars.DSH_APP_VERSION,'v2');
  const d=await readFile(new URL('../Dockerfile',import.meta.url),'utf8');assert.match(d,/ARG DSH_APP_VERSION=v1/);assert.match(d,/\/app\/runtime-version.json/);
 });
 
@@ -80,4 +80,15 @@ test('approval action is orange and reachable while desktop slides never use a p
 test('version update precedes instance controls and console zones have distinct hierarchy',()=>{
  const html=page.split('<script>')[0];assert.ok(html.indexOf('id="upgrade-version"')<html.indexOf('id="instance-cpu-current"'));assert.ok(html.indexOf('id="upgrade-version"')<html.indexOf('id="instance-select"'));assert.ok(html.includes('environment-heading">版本更新'));assert.ok(html.includes('environment-heading">实例管理'));
  assert.match(page,/topbar-metrics strong/);assert.match(page,/background:#eef2e8/);assert.match(page,/background:#e0e8d6/);
+});
+
+
+test('both image variants bundle all demo assets before version metadata',async()=>{
+ const docker=await readFile(new URL('../Dockerfile',import.meta.url),'utf8'),config=JSON.parse(await readFile(new URL('../wrangler.jsonc',import.meta.url),'utf8'));const at=docker.indexOf('ARG DSH_APP_VERSION=');
+ for(const file of ['demo-environment.mjs','demo-sales.csv','site-check.mjs','build-review-deck.mjs','deck-template.html']){const copy='COPY container/'+file;assert.ok(docker.includes(copy),file);assert.ok(docker.indexOf(copy)<at,file+' must be common to V1 and V2');assert.ok(docker.includes('test -s /app/'+file),'build assertion '+file)}
+ const a=config.containers[0].images.dsh,b=config.containers[0].images.v2;assert.deepEqual({...a,build_vars:undefined},{...b,build_vars:undefined});assert.deepEqual(Object.keys(a.build_vars),['DSH_APP_VERSION']);assert.deepEqual(Object.keys(b.build_vars),['DSH_APP_VERSION']);
+});
+test('V1 and V2 both expose Node diagnostics and have distinct cosmetic badges',async()=>{
+ const source=await readFile(new URL('../container/server.mjs',import.meta.url),'utf8');const identity=source.split('\n').find(line=>line.startsWith('const runtimeIdentity = '));const fn=page.split('\n').find(line=>line.startsWith('function renderVersion(v)'));assert.ok(identity);assert.ok(fn);
+ for(const version of ['v1','v2']){const info=new Script(identity+'; runtimeIdentity()').runInNewContext({runtimeVersion:version,process:{version:'v24.0.0'}});assert.equal(info.runtimeVersion,version);assert.equal(info.nodeVersion,'v24.0.0');const nodes=new Map(),el=id=>{if(!nodes.has(id))nodes.set(id,{dataset:{}});return nodes.get(id)};new Script(fn+'; renderVersion(v)').runInNewContext({el,v:{current:version,nodeVersion:info.nodeVersion}});assert.equal(el('app-version').dataset.version,version);assert.match(el('app-version').textContent,version==='v1'?/青蓝/:/墨绿/);assert.equal(el('node-version').textContent,'v24.0.0')}
 });

@@ -31,7 +31,10 @@
       "scheduling_policy": "durable_object",
       "images": {
         "dsh": {
-          "dockerfile": "./Dockerfile"
+          "dockerfile": "./Dockerfile",
+          "build_vars": {
+            "DSH_APP_VERSION": "v1"
+          }
         },
         "v2": {
           "dockerfile": "./Dockerfile",

@@ -589,7 +589,7 @@ export class DshAgent extends DurableObject {
         await stage('validating');
         let info;
         for(let i=0;i<40;i++) { try { const r=await this.bridge('/status');if(r.ok){info=await r.json();break;} }catch{} await new Promise(r=>setTimeout(r,250)); }
-        if(info?.runtimeVersion !== body.version || (body.version === 'v2' && !/^v[0-9]+\./.test(info.nodeVersion || '')) || (body.refreshImage===true && info.demoEnvironmentVersion!==1)) throw Error('目标容器版本或功能核验失败。');
+        if(info?.runtimeVersion !== body.version || (body.version === 'v2' && !/^v[0-9]+\./.test(info.nodeVersion || '')) || ((body.refreshImage===true||before.demoEnvironmentVersion===1) && info.demoEnvironmentVersion!==1)) throw Error('目标容器版本或功能核验失败。');
         const history = await this.readHistory();
         if(JSON.stringify(history.sessions || []) !== JSON.stringify((await this.ctx.storage.get('checkpointHistory'))?.sessions || [])) throw Error('恢复后的会话目录不一致。');
         const quiet = await this.bridge('/quiesce',{}); if(!quiet.ok) throw Error('恢复后的环境无法安全保存。');

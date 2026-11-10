@@ -490,3 +490,11 @@ test('explicit same-label image refresh uses fresh image plus R2 migration, regu
 test('image refresh refuses old capability and preserves explicit recovery on failure',async()=>{
  const f=versionFixture();await assert.rejects(f.g.changeVersion({version:'v1',confirm:true,refreshImage:true}),/功能核验/);assert.ok(f.data.get('versionOperation'));assert.equal(f.c.running,false);assert.ok(f.data.get('checkpoint'));
 });
+
+
+test('new V1 and V2 switches preserve the common demo capability and session directory',async()=>{
+ const f=versionFixture();f.info.demoEnvironmentVersion=1;for(const version of ['v2','v1','v2']){const r=await f.g.changeVersion({version,confirm:true});assert.equal(r.version,version);const info=await f.g.status();assert.equal(info.demoEnvironmentVersion,1);assert.deepEqual(info.sessions,[]);assert.equal(f.data.get('versionOperation'),null)}
+});
+test('switching from complete environment to a target missing demo tools is not success',async()=>{
+ const f=versionFixture();f.info.demoEnvironmentVersion=1;const start=f.c.start.bind(f.c);f.c.start=o=>{start(o);f.info.demoEnvironmentVersion=0};await assert.rejects(f.g.changeVersion({version:'v2',confirm:true}),/功能核验/);assert.ok(f.data.get('versionOperation'));assert.equal(f.c.running,false);assert.ok(f.data.get('checkpoint'));
+});

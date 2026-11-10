@@ -10,7 +10,8 @@ import { DeepSeekHarness } from '@deepseek-ai/dsh-sdk-client';
 let runtimeVersion = null;
 try { runtimeVersion = JSON.parse(await readFile('/app/runtime-version.json','utf8')).version; }
 catch(e) { if(e.code !== 'ENOENT') throw e; }
-const runtimeIdentity = () => ({ runtimeVersion, ...(runtimeVersion === 'v2' ? { nodeVersion: process.version } : {}) });
+// V1/V2 differ only by their release badge, never by tools or Node diagnostics.
+const runtimeIdentity = () => ({ runtimeVersion, nodeVersion: process.version });
 await mkdir('/data/workspace', { recursive: true });
 let state = { sessionId: null, task: null, history: [] };
 try { state = JSON.parse(await readFile('/data/state.json', 'utf8')); }
