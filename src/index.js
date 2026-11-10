@@ -23,9 +23,27 @@ export function taskPhaseFor(info,models,lease,now=Date.now()) {
   if(pending.length)return phase('approval','等待你的授权','有工具操作等待本次授权，请核对并处理权限申请。',Math.min(...pending.map(a=>a.at).filter(Number.isFinite)));
   if(lease?.taskId===task.id&&lease.expiresAt>now)return phase('browser','等待浏览器检查结果','正在准备或执行 Cloudflare Browser Run 检查与截图。',lease.startedAt);
   const calls=models?.taskId===task.id?(models.calls||[]).filter(c=>c.startedAt>now-15*MINUTE):[];
-  if(calls.length)return phase('model',calls.some(c=>c.responseStartedAt)?'正在接收模型响应':'等待模型响应','模型请求正在外部服务处理中；此状态不代表容器 CPU 用量为零。',Math.min(...calls.map(c=>c.startedAt)));
+  if(calls.length)return phase('model','模型请求进行中','',Math.min(...calls.map(c=>c.startedAt)));
   if(info.runtimeReady===false)return phase('preparing','正在准备 Agent','正在初始化或恢复 Agent 会话。',task.startedAt);
   return phase('executing','Agent 正在执行','正在执行或处理工具结果；当前没有已确认的外部等待事件。',null);
+}
+// Wall-clock phase sampling; never infer CPU idle time from these measurements.
+export function advanceTaskWait(previous,task,phase,now=Date.now()) {
+  if(!previous||previous.taskId!==task?.id)return null;
+  if(previous.finishedAt)return previous;
+  const end=task.status!=='running'&&Number.isFinite(task.finishedAt)?Math.min(now,task.finishedAt):now;
+  const next=structuredClone(previous),at=Math.max(previous.lastObservedAt,end),delta=at-previous.lastObservedAt;
+  const kinds=['model','browser','approval','other','unobserved'];
+  const key=delta>3000?'unobserved':kinds.includes(previous.phase)?previous.phase:'unobserved';
+  next.ms[key]=(next.ms[key]||0)+delta;next.lastObservedAt=at;
+  next.phase=phase&&['model','browser','approval'].includes(phase.kind)?phase.kind:'other';
+  if(task.status!=='running')next.finishedAt=at;
+  return next;
+}
+export function taskWaitView(stats) {
+  if(!stats)return null;const totalMs=Math.max(0,(stats.finishedAt||stats.lastObservedAt)-stats.startedAt),unobservedMs=stats.ms.unobserved||0;
+  const waitMs=(stats.ms.model||0)+(stats.ms.browser||0)+(stats.ms.approval||0),coverage=totalMs?Math.max(0,1-unobservedMs/totalMs):0;
+  return {taskId:stats.taskId,totalMs,waitMs,coverage,ratio:totalMs>0&&coverage>=0.9?Math.min(1,waitMs/totalMs):null,modelMs:stats.ms.model||0,browserMs:stats.ms.browser||0,approvalMs:stats.ms.approval||0,unobservedMs,estimated:true,finished:!!stats.finishedAt};
 }
 function diagnosticText(value) {
   return String(value ?? 'Unknown error').replace(/Bearer\s+[^\s"\\]+/gi, 'Bearer [redacted]').replace(/\bsk-[A-Za-z0-9_-]+/g, '[redacted]').slice(0, 1600);
@@ -192,7 +210,7 @@ export class DshAgent extends DurableObject {
       if(body.demo==='web-deck-v1')await this.prepareDemoFiles(status);
       // Record intent before crossing the process boundary. An ambiguous response must not replay work.
       const intent = { id: body.id, status: 'submission-unknown', startedAt: Date.now() };
-      await this.ctx.storage.put({ ['request:' + body.id]: intent, lastActivity: Date.now(), taskTimingStart: { id: body.id, acceptedAt: intent.startedAt } });
+      await this.ctx.storage.put({ ['request:' + body.id]: intent, lastActivity: Date.now(), taskTimingStart: { id: body.id, acceptedAt: intent.startedAt }, taskWaitMetrics:{taskId:body.id,startedAt:intent.startedAt,lastObservedAt:intent.startedAt,phase:'unobserved',ms:{model:0,browser:0,approval:0,other:0,unobserved:0}} });
       const r = await this.bridge('/tasks', body); const task = await r.json();
       if (r.ok) { this.live = null; await this.ctx.storage.put({ ['request:' + body.id]: task, lastTask: task }); }
       return Response.json(task, { status: r.status });
@@ -380,7 +398,11 @@ export class DshAgent extends DurableObject {
       const lastActivity = await this.ctx.storage.get('lastActivity');
       const preview = await this.ctx.storage.get('previewConfig');
       const activePreview = this.ctx.container.running && preview?.expiresAt > Date.now() ? { ...preview, url: '/preview/' + preview.id + '/index.html' } : null;
-      return { ...info, taskPhase: this.ctx.container.running?taskPhaseFor(info,await this.ctx.storage.get('modelActivity'),await this.ctx.storage.get('siteCheckLease')):null, environmentProgress: await this.ctx.storage.get('environmentProgress') || null, instance: {current: this.ctx.container.running ? (await this.ctx.storage.get('activeInstance')) || 'standard-1' : cp?.instance || 'standard-1', source: this.ctx.container.running ? 'startup-config' : 'checkpoint'}, versions: await this.versions(info), lastBrowserCheck: await this.ctx.storage.get('lastBrowserCheck') ?? null, preview: activePreview, live: this.live?.taskId === info.task?.id ? this.live : null, lastBoot: await this.ctx.storage.get('lastBoot') ?? null, responseTiming: await this.ctx.storage.get('responseTiming') ?? null, hasBackup, backupAt, idleShutdownAt: this.ctx.container.running && !info.busy && lastActivity ? lastActivity + 10 * MINUTE : null, running: this.ctx.container.running, checkpointAt: cp?.at ?? null, checkpointError: await this.ctx.storage.get('checkpointError') ?? null, lastGatewayError: await this.ctx.storage.get('lastGatewayError') ?? null, modelConfig: { model: this.env.AI_MODEL || null, gateway: this.env.AI_GATEWAY_ID || 'default' } };
+      const taskPhase=this.ctx.container.running?taskPhaseFor(info,await this.ctx.storage.get('modelActivity'),await this.ctx.storage.get('siteCheckLease')):null;
+      const previousWait=await this.ctx.storage.get('taskWaitMetrics');
+      const waitStats=advanceTaskWait(previousWait,info.task,taskPhase);
+      if(waitStats&&!previousWait?.finishedAt)await this.ctx.storage.put('taskWaitMetrics',waitStats);
+      return { ...info, taskPhase, taskWait:taskWaitView(waitStats), environmentProgress: await this.ctx.storage.get('environmentProgress') || null, instance: {current: this.ctx.container.running ? (await this.ctx.storage.get('activeInstance')) || 'standard-1' : cp?.instance || 'standard-1', source: this.ctx.container.running ? 'startup-config' : 'checkpoint'}, versions: await this.versions(info), lastBrowserCheck: await this.ctx.storage.get('lastBrowserCheck') ?? null, preview: activePreview, live: this.live?.taskId === info.task?.id ? this.live : null, lastBoot: await this.ctx.storage.get('lastBoot') ?? null, responseTiming: await this.ctx.storage.get('responseTiming') ?? null, hasBackup, backupAt, idleShutdownAt: this.ctx.container.running && !info.busy && lastActivity ? lastActivity + 10 * MINUTE : null, running: this.ctx.container.running, checkpointAt: cp?.at ?? null, checkpointError: await this.ctx.storage.get('checkpointError') ?? null, lastGatewayError: await this.ctx.storage.get('lastGatewayError') ?? null, modelConfig: { model: this.env.AI_MODEL || null, gateway: this.env.AI_GATEWAY_ID || 'default' } };
     });
   }
   async readHistory() {

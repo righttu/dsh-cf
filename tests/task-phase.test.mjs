@@ -8,3 +8,12 @@ test('phase appears below heading, reports observed elapsed time and hides at ta
  ctx.renderTaskPhase({task:{status:'completed'}});assert.equal(el('task-phase').hidden,true);ctx.renderTaskPhase({task:{status:'running'},taskPhase:null});assert.equal(el('phase-label').textContent,'Agent 正在执行');assert.equal(el('phase-elapsed').textContent,'');assert.ok(page.indexOf('id="task-phase"')>page.indexOf('id="task-heading"'));
  assert.match(page,/不是 CPU 使用率/);assert.match(page,/内存和磁盘按配置规格计费/);assert.doesNotMatch(page,/CPU 使用率为 0|等待期间不计费|空等免费/);
 });
+
+
+test('model phase omits the removed paragraph and wait summary remains visible for final task',()=>{
+ const script=page.match(/<script>([\s\S]*)<\/script>/)[1],lines=script.split('\n');const nodes=new Map(),el=id=>{if(!nodes.has(id))nodes.set(id,{dataset:{}});return nodes.get(id)};const ctx={el,ms:v=>(v/1000).toFixed(1)+' 秒'};
+ new Script(lines.find(x=>x.startsWith('function renderTaskPhase(s)'))+';'+lines.find(x=>x.startsWith('function renderTaskWait(s)'))).runInNewContext(ctx);
+ ctx.renderTaskPhase({task:{id:'t',status:'running'},taskPhase:{kind:'model',label:'模型请求进行中',detail:''}});assert.equal(el('phase-detail').hidden,true);assert.equal(el('phase-detail').textContent,'');
+ ctx.renderTaskWait({task:{id:'t',status:'completed'},taskWait:{taskId:'t',ratio:0.6,waitMs:3000,totalMs:5000,modelMs:1000,browserMs:1000,approvalMs:1000,unobservedMs:0,coverage:1,finished:true}});assert.equal(el('wait-summary').hidden,false);assert.match(el('wait-ratio').textContent,/60.0%/);assert.match(el('wait-duration').textContent,/已结束/);
+ ctx.renderTaskWait({task:{id:'t'},taskWait:{taskId:'t',ratio:null,waitMs:0,totalMs:5000,coverage:0,unobservedMs:5000,modelMs:0,browserMs:0,approvalMs:0}});assert.match(el('wait-ratio').textContent,/观测不足/);ctx.renderTaskWait({task:{id:'old'},taskWait:{taskId:'t'}});assert.equal(el('wait-summary').hidden,true);
+});
